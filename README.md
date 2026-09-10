@@ -8,7 +8,7 @@ unless it finds a stable release, and the real repository's default
 branch is its long-standing YAML package — so HACS cannot install
 from there. This repository's default branch is the integration.
 
-Currently carrying **v0.1.0a1**, copied automatically from
+Currently carrying **v0.1.0a2**, copied automatically from
 [mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant).
 
 - **Issues, discussions and pull requests:**
@@ -27,7 +27,7 @@ services.
 
 HACS will show a commit hash rather than a version number, because
 this repository publishes no releases of its own. The integration
-reports its real version — `v0.1.0a1` — in its own name and under
+reports its real version — `v0.1.0a2` — in its own name and under
 Settings → Repairs.
 
 ## It is a preview
