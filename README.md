@@ -10,7 +10,8 @@ from there. This repository's default branch is the integration.
 
 It follows the development branch of
 [mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant/tree/proper-ha-integration)
-automatically, about once an hour, and publishes a commit only when
+automatically — usually within an hour or two, since GitHub runs
+scheduled work when it has room — and publishes a commit only when
 upstream's own CI passed for it and the library version it pins can
 actually serve it.
 
