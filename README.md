@@ -8,8 +8,11 @@ unless it finds a stable release, and the real repository's default
 branch is its long-standing YAML package — so HACS cannot install
 from there. This repository's default branch is the integration.
 
-Currently carrying **v0.1.0a2**, copied automatically from
-[mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant).
+It follows the development branch of
+[mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant/tree/proper-ha-integration)
+automatically, about once an hour, and publishes a commit only when
+upstream's own CI passed for it and the library version it pins can
+actually serve it.
 
 - **Issues, discussions and pull requests:**
   [mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant/issues)
@@ -25,16 +28,26 @@ category **Integration**. Then download it, restart Home Assistant,
 and add **Sungrow Modbus (preview)** under Settings → Devices &
 services.
 
-HACS will show a commit hash rather than a version number, because
-this repository publishes no releases of its own. The integration
-reports its real version — `v0.1.0a2` — in its own name and under
-Settings → Repairs.
+## Which code you are running
 
-## It is a preview
+HACS shows a **commit hash** rather than a version number, because
+this repository publishes no releases of its own — and that hash is
+the one thing worth quoting in a bug report. It belongs to *this*
+repository; the matching commit message names the upstream commit it
+came from, so one click goes from what you installed to the code it
+was built out of.
 
-Registers can move and entity ids can change. If you want something
-finished, use the **YAML package** on the real repository's default
-branch: five years old, and in use by thousands of people.
+The integration also reports a version of its own — in its name and
+under Settings → Repairs — but between releases several commits here
+share it, so it identifies the release, not your install.
+
+## It is a preview, and it tracks a branch
+
+This is the development branch, not a release: registers can move
+and entity ids can change. Updates arrive as they are committed. If
+you want something finished, use the **YAML package** on the real
+repository's default branch: five years old, and in use by thousands
+of people.
 
 The most useful thing you can do with it is send a reading. The
 integration can produce one for you: add it in **Diagnostics only**
