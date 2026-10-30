@@ -19,7 +19,7 @@ actually serve it.
   [mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant/issues)
 - **What this is, what works and what does not:**
   [the real README](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant/tree/proper-ha-integration)
-- **Installing without HACS:**
+- **Installing it, step by step:**
   [doc/installing_a_preview.md](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant/blob/proper-ha-integration/doc/installing_a_preview.md)
 
 ## Install
@@ -53,7 +53,8 @@ of people.
 The most useful thing you can do with it is send a reading. The
 integration can produce one for you: add it in **Diagnostics only**
 mode if you do not want any entities, fill in
-**Options → Help this project**, and download the diagnostics.
+**Options → Contribute a capability survey**, press **Run capability
+survey** on the device page, and download the document it offers.
 
 ## When this repository goes away
 
