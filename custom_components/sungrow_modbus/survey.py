@@ -28,7 +28,7 @@ serialized connection, and a Sungrow grants very few sessions: two runs at once
 would interleave, and with writes in the picture that means restoring each
 other's probe values.
 
-Nothing here talks Modbus. `fingerprint.async_build` does the reading,
+Nothing here talks Modbus. `survey_document.async_build` does the reading,
 `control_test.ControlTestRunner` does the writing, and both call back with a
 fraction and a label; this turns those into state and splits one progress bar
 between them.
@@ -56,10 +56,10 @@ from sungrow_modbus.control_test import (
 
 from .const import (
     CONF_CONTROL_TEST_EXPORT,
+    CONF_CONTROL_TEST_PV_CUT,
     CONF_CONTROL_TEST_RESTART,
     CONF_SURVEY_DUMP,
     DEFAULT_SURVEY_DUMP,
-    DISCORD_URL,
     DOMAIN,
     LINK_VALID,
     SURVEY_ISSUE_URL,
@@ -167,9 +167,7 @@ class SurveyRunner:
         async_dispatcher_send(self.hass, self.signal)
 
     @callback
-    def async_start(
-        self, options: dict[str, Any] | None = None, *, control_test: bool = False
-    ) -> bool:
+    def async_start(self, *, control_test: bool = False) -> bool:
         """Begin a run. Returns False when one is already running.
 
         `control_test` adds part B, which **writes** to every control the
@@ -207,7 +205,7 @@ class SurveyRunner:
         )
         self._task = self.entry.async_create_background_task(
             self.hass,
-            self._async_run(options, control_test),
+            self._async_run(control_test),
             name=f"sungrow survey {self.entry.entry_id}",
         )
         return True
@@ -225,7 +223,7 @@ class SurveyRunner:
         A's. The alternative -- a bar that resets, or a second bar -- is worse
         for the person watching, and the step label names the part throughout.
         """
-        from .fingerprint import planned_steps as survey_steps, wallbox_is_direct
+        from .survey_document import planned_steps as survey_steps, wallbox_is_direct
 
         dumping = bool(options.get(CONF_SURVEY_DUMP, DEFAULT_SURVEY_DUMP))
         a_steps = survey_steps(
@@ -268,11 +266,10 @@ class SurveyRunner:
             enable_export_limit=bool(
                 self.entry.options.get(CONF_CONTROL_TEST_EXPORT, False)
             ),
+            cut_pv=bool(self.entry.options.get(CONF_CONTROL_TEST_PV_CUT, False)),
         )
 
-    async def _async_run(
-        self, options: dict[str, Any] | None, control_test: bool = False
-    ) -> None:
+    async def _async_run(self, control_test: bool = False) -> None:
         """Build the document, and end in a state either way.
 
         A failure is kept and shown rather than raised. Somebody who pressed
@@ -286,12 +283,12 @@ class SurveyRunner:
         is and what it has, and writing to a device none of that is known about
         is exactly the thing the control test's own guards exist to refuse.
         """
-        # Imported here rather than at module level: `fingerprint` imports
+        # Imported here rather than at module level: `survey_document` imports
         # the library, and this module is imported by the platforms.
-        from .fingerprint import async_build, attach_control_test
+        from .survey_document import async_build, attach_control_test
 
         share, _a_steps = self._shares(
-            options or dict(self.entry.options),
+            dict(self.entry.options),
             control_test,
             block_test.planned_steps(await block_test.inverter_blocks()),
         )
@@ -305,7 +302,6 @@ class SurveyRunner:
                 document = await async_build(
                     self.hass,
                     self.entry,
-                    options,
                     on_progress=lambda fraction, label: self._on_progress(
                         fraction * share, label
                     ),
@@ -403,7 +399,7 @@ class SurveyRunner:
         # Imported late for the same reason as `async_build`: this module is
         # imported by the platforms, and `download` imports the HTTP stack.
         from .download import async_download_url
-        from .fingerprint import summarise
+        from .survey_document import summarise
 
         url = async_download_url(self.hass, self.entry)
         lapses = dt_util.now() + LINK_VALID
@@ -428,13 +424,12 @@ class SurveyRunner:
                 f'<a href="{url}" target="_blank">Download the document</a>'
                 " — this link stops working at "
                 f"{lapses.strftime('%H:%M')}. After that, press "
-                "**Run capability survey** again for a fresh one, or use "
+                "**Run read only diagnosis** again for a fresh one, or use "
                 "**Download diagnostics** on the device page, which carries "
                 "the same document and never expires.\n\n"
                 "It carries a stand-in serial rather than the real one, and "
                 "your address only if you allowed it. Send it to "
-                f"[the issue tracker]({SURVEY_ISSUE_URL}) or "
-                f"[Discord]({DISCORD_URL}) — what varies between "
+                f"[the survey issue]({SURVEY_ISSUE_URL}) — what varies between "
                 "installations is the thing no specification has told this "
                 "project reliably."
             ),
@@ -479,20 +474,19 @@ class SurveyRunner:
         if document is None:
             return
         # Imported late, as above.
-        from .fingerprint import summarise
+        from .survey_document import summarise
 
         persistent_notification.async_create(
             self.hass,
             (
                 f"{summarise(document)}\n\n"
                 "The download link in this notification has expired. Press "
-                "**Run capability survey** again for a fresh one, or use "
+                "**Run read only diagnosis** again for a fresh one, or use "
                 "**Download diagnostics** on the device page — that carries "
                 "the same document and never expires.\n\n"
                 "It carries a stand-in serial rather than the real one, and "
                 "your address only if you allowed it. Send it to "
-                f"[the issue tracker]({SURVEY_ISSUE_URL}) or "
-                f"[Discord]({DISCORD_URL})."
+                f"[the survey issue]({SURVEY_ISSUE_URL})."
             ),
             title=f"Survey finished: {self.entry.title}",
             notification_id=self._notification_id,
@@ -511,4 +505,4 @@ def async_runner(entry: SungrowConfigEntry) -> SurveyRunner:
 
 
 Progress = Callable[[float, str], None]
-"""What `fingerprint.async_build` calls after each read it can count."""
+"""What `survey_document.async_build` calls after each read it can count."""

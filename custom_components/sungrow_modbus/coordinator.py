@@ -183,6 +183,16 @@ class SungrowDataUpdateCoordinator(
             # Still inside the first refresh; capabilities are resolved just
             # after it, from exactly this data.
             return
+        if changed := self._firmware_changed(runtime.firmware):
+            self._reload_scheduled = True
+            _LOGGER.info(
+                "%s now runs firmware %s; reloading, since what is read and "
+                "which entities exist were decided from the firmware",
+                self.name,
+                changed,
+            )
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+            return
         gained = self.device.capabilities() - runtime.capabilities
         if not gained:
             return
@@ -194,6 +204,19 @@ class SungrowDataUpdateCoordinator(
             ", ".join(sorted(c.value for c in gained)),
         )
         self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+
+    def _firmware_changed(self, at_setup: tuple[str | None, str | None]) -> str | None:
+        """Name the firmware string that differs from setup's, or None.
+
+        Only a string read both times is compared. One missing now is a missed
+        read, not a downgrade to nothing; one missing at setup and present now
+        is a dongle answering empty one time and text the next, and reloading
+        on it would let a flaky path reload the entry every slowest poll.
+        """
+        for before, now in zip(at_setup, self.device.firmware_strings, strict=True):
+            if before is not None and now is not None and now != before:
+                return now
+        return None
 
     def _log_transitions(self, report: UpdateReport) -> None:
         """Log a component going quiet, and coming back, exactly once."""
@@ -282,10 +305,11 @@ class SungrowSubDeviceCoordinator(
         everything. `via_device_id` is what puts it under the inverter in the
         interface, which is also where it sits physically.
 
-        Identified by the **inverter's** serial with a suffix. An SBR reports
-        no serial anywhere in the 10740-10789 band, which the survey reads
-        whole. A wallbox does report one, at input registers 21201-21206,
-        and nothing here reads it.
+        Identified by the **inverter's** serial with a suffix, for both. An
+        SBR reports no serial anywhere in the 10740-10789 band, which the
+        survey reads whole. A wallbox does report one, at input registers
+        21201-21206, and shows it as its `serial_number` -- but the identifier
+        stays the inverter's, so the devices users already have keep theirs.
         """
         serial = self.inverter_serial
         model = self._model()
@@ -295,8 +319,12 @@ class SungrowSubDeviceCoordinator(
             manufacturer=MANUFACTURER,
             model=model or label,
             name=model or label,
+            serial_number=self.own_serial,
             via_device_id=self.config_entry.runtime_data.inverter_device_id,
         )
+
+    #: The device's own serial, where it reports one. Read once at setup.
+    own_serial: str | None = None
 
     @asynccontextmanager
     async def _reading(self) -> AsyncIterator[None]:
@@ -389,6 +417,19 @@ class SungrowWallboxCoordinator(SungrowSubDeviceCoordinator):
         super().__init__(*args, **kwargs)
         self._polls = 0
 
+    async def _async_setup(self) -> None:
+        """Read the wallbox's serial once, for the device registry.
+
+        Once, because it cannot change. A failed read leaves the device
+        without one rather than failing the wallbox: it is shown, never used
+        to identify anything. Kept off every published document -- a survey
+        carries only its stand-in, and diagnostics redact `serial_number`.
+        """
+        try:
+            self.own_serial = await self.device.async_read_serial()
+        except (ModbusError, TimeoutError, OSError):
+            _LOGGER.debug("%s: the wallbox serial did not read", self.name)
+
     def _model(self) -> str | None:
         """Name the wallbox from the model register it does answer."""
         model: str | None = self.device.model
@@ -437,6 +478,13 @@ class SungrowRuntimeData:
 
     intervals: dict[str, int] = field(default_factory=dict)
     """Seconds per tier, as configured. A tier missing here is not polled."""
+
+    firmware: tuple[str | None, str | None] = (None, None)
+    """The two firmware strings setup read, 2582 and 13250.
+
+    What every firmware-keyed decision of this entry was made from, so a
+    poll that reads different ones knows the entry is out of date.
+    """
 
     inverter_device_id: str | None = None
     """The inverter's device-registry id, which a sub-device hangs off.

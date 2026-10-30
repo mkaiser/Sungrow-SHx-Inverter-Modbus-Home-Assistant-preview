@@ -145,6 +145,13 @@ CONF_CONTROL_TEST_RESTART = "control_test_restart"
 #: nothing.
 CONF_CONTROL_TEST_EXPORT = "control_test_export_limit"
 
+#: Let the control test cut PV generation for about a minute (register 31211).
+#:
+#: Off by default: it is the one check that takes generation away on purpose.
+#: It is also the only evidence that writing 31211 does what it should, which
+#: is what the `Cut PV generation` switch waits for on each firmware.
+CONF_CONTROL_TEST_PV_CUT = "control_test_pv_cut"
+
 #: Which slot of a multi-inverter YAML install this entry's device was.
 #:
 #: `""` for a single-inverter package, `"_inv_2"` for the second inverter of a
@@ -178,6 +185,14 @@ CONF_EXPORT_WRITE_SCALE = "export_write_scale"
 #: for the YAML package's users (#763: "Firmware update changed the behaviour
 #: of Export Power Limit"). Kept beside the factor, in `data`, for its reasons.
 CONF_EXPORT_WRITE_SCALE_FIRMWARE = "export_write_scale_firmware"
+
+#: The publishable record of the write that measured `CONF_EXPORT_WRITE_SCALE`:
+#: `export_scale.document` plus the day it was asked. The factor alone is what
+#: writing needs; a survey document carries this, as the terminal's
+#: `--export-scale --merge-into` does, so a reading from Home Assistant says
+#: how its firmware writes 13074 and shows the one write behind the answer.
+#: Stored and discarded together with the factor.
+CONF_EXPORT_WRITE_SCALE_PROBE = "export_write_scale_probe"
 
 #: Entities reporting generation the Sungrow cannot see, as a list of ids.
 #:
@@ -307,44 +322,39 @@ Promoted to a full entry later from the options flow, which is when the
 entity-ids question gets asked.
 """
 
-#: Whether the UI lets anybody *choose* devices mode. Off during the alpha.
+#: Whether the UI offers only the survey, so nobody can *choose* devices
+#: mode. On during the alpha.
 #:
 #: This gates the door, not the room. Every line of devices mode stays built
-#: and stays tested; what is switched off is the two places a person can
+#: and stays tested; what is shut is the two places a person can
 #: create such an entry -- the question the config flow opens with, and the
 #: promotion toggle on a diagnostics entry's options page.
 #:
-#: Off because that path contains the **weightiest** decision this
+#: On because that path contains the **weightiest** decision this
 #: integration makes. Choosing to take over `modbus_sungrow.yaml`'s entity ids
 #: decides which ids years of recorder history and every dashboard card attach
 #: to, and getting it wrong breaks both silently. That is not a thing to put
 #: in front of a stranger running an alpha, and an alpha's job here is to
 #: gather readings anyway.
 #:
-#: Neither place hides anything, because somebody evaluating this integration
-#: should be able to see that the ordinary setup exists. The menu still offers
-#: devices mode and its step (`devices_later`) says it is coming and carries
-#: on as diagnostics; the promotion toggle is greyed. `promote` refuses too,
-#: so a hand-written request cannot get round the screen.
+#: The opening menu offers only the survey and says the ordinary setup comes
+#: later; the promotion toggle is greyed. `setup_devices` and `promote`
+#: refuse too, so a hand-written request cannot get round the screen.
 #:
-#: **Flipping this to True is the whole re-enablement.**
+#: **Flipping this to False is the whole re-enablement.**
 #: `tests/test_alpha_gate.py` asserts both halves of that, and nothing outside
 #: the config flow branches on it.
 #:
 #: It does not touch an entry that already exists. A devices entry -- from a
 #: backup, or made while the gate was open -- loads, polls and configures
 #: normally.
-DEVICES_MODE_OFFERED = False
+ONLY_SURVEY_MODE = True
 
-#: Where a contributed reading goes. The compatibility report template asks
-#: for exactly what a survey produces, so the form arrives pre-shaped.
+#: Where a contributed reading goes: the one pinned survey issue, so every
+#: survey is a comment in one place rather than an issue of its own.
 SURVEY_ISSUE_URL = (
-    "https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant"
-    "/issues/new?template=compatibility_report.yml"
+    "https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant/issues/786"
 )
-
-#: And the route for somebody without a GitHub account, which is most people.
-DISCORD_URL = "https://discord.gg/ZvYBejFkm2"
 
 #: How long a signed survey download link stays valid. Long enough to
 #: notice the notification and press it, short enough that a copied URL in

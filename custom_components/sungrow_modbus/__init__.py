@@ -40,6 +40,7 @@ from sungrow_modbus import (
 )
 from sungrow_modbus.battery import probe_units
 from sungrow_modbus.battery.device import SungrowBattery
+from sungrow_modbus.inverter.capabilities import with_sungrow_battery
 from sungrow_modbus.wallbox import (
     UNITS as WALLBOX_UNITS,
     probe_units as wallbox_probe_units,
@@ -50,6 +51,7 @@ from .const import (
     CONF_ENTITY_IDS,
     CONF_EXPORT_WRITE_SCALE,
     CONF_EXPORT_WRITE_SCALE_FIRMWARE,
+    CONF_EXPORT_WRITE_SCALE_PROBE,
     CONF_EXTERNAL_PLACEMENT,
     CONF_EXTERNAL_SOURCES,
     CONF_INTERVALS,
@@ -208,6 +210,36 @@ async def _async_connect(
     return unit, inverter
 
 
+async def _async_read_firmware(
+    entry: SungrowConfigEntry, inverter: SungrowInverter
+) -> tuple[str | None, str | None]:
+    """Read both firmware strings, before the first poll and before capabilities.
+
+    Firmware decides what is read at all -- one measured version closes the
+    connection on blocks the first poll would otherwise ask for -- and what
+    some entities may do. Knowing it after the first poll is too late for the
+    first and a guess for the second.
+
+    A string that does not answer is None, and setup carries on: an inverter
+    that withholds its firmware is gated by nothing in either direction. A
+    lost link is `ConfigEntryNotReady`, as for the identity just before.
+    """
+    try:
+        report = await inverter.async_update_firmware()
+    except ModbusConnectionError as err:
+        raise ConfigEntryNotReady(
+            f"Could not read the firmware of {entry.title}: {err}"
+        ) from err
+    for name, err in report.failed.items():
+        _LOGGER.debug("%s: %s did not answer at setup: %s", entry.title, name, err)
+    _LOGGER.debug(
+        "%s runs firmware %s",
+        entry.title,
+        " / ".join(v or "unknown" for v in inverter.firmware_strings),
+    )
+    return inverter.firmware_strings
+
+
 async def _async_tier_coordinators(
     hass: HomeAssistant, entry: SungrowConfigEntry, inverter: SungrowInverter
 ) -> tuple[dict[str, int], dict[str, SungrowDataUpdateCoordinator]]:
@@ -307,6 +339,7 @@ async def _async_take_over_legacy_ids(
 async def async_setup_entry(hass: HomeAssistant, entry: SungrowConfigEntry) -> bool:
     """Set up a Sungrow SHx inverter from a config entry."""
     _unit, inverter = await _async_connect(hass, entry)
+    firmware = await _async_read_firmware(entry, inverter)
 
     intervals, coordinators = await _async_tier_coordinators(hass, entry, inverter)
 
@@ -319,6 +352,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: SungrowConfigEntry) -> b
         ", ".join(sorted(c.value for c in capabilities)) or "none",
     )
     battery, battery_has_cells = await _async_battery(hass, entry, inverter, intervals)
+    # Only now: the pack is on a unit of its own, which the inverter's
+    # registers cannot see, and an SBR is what lets a battery's write bounds
+    # come from its datasheet rather than from BMS current times voltage.
+    capabilities = with_sungrow_battery(
+        capabilities,
+        pack_found=battery is not None,
+        capacity_kwh=_capacity(inverter),
+    )
     wallbox = await _async_wallbox(hass, entry, inverter, intervals)
     inverter_device_id = _async_register_inverter(hass, entry, coordinators)
 
@@ -327,6 +368,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SungrowConfigEntry) -> b
         coordinators,
         capabilities,
         intervals,
+        firmware=firmware,
         inverter_device_id=inverter_device_id,
         battery=battery,
         wallbox=wallbox,
@@ -441,6 +483,15 @@ async def _async_check_control_test(
         else "",
     )
     async_raise(hass, entry, snapshot)
+
+
+def _capacity(inverter: SungrowInverter) -> float | None:
+    """Return register 5639's capacity in kWh, or None where it did not read."""
+    try:
+        value = inverter.field("battery_capacity_high_precision")
+    except (AttributeError, KeyError):
+        return None
+    return None if value is None else float(value)
 
 
 async def _async_battery(
@@ -674,7 +725,11 @@ async def _async_options_changed(
 
 def _built_from(entry: SungrowConfigEntry) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return what setup builds an entry from: everything but what it never reads."""
-    measured = {CONF_EXPORT_WRITE_SCALE, CONF_EXPORT_WRITE_SCALE_FIRMWARE}
+    measured = {
+        CONF_EXPORT_WRITE_SCALE,
+        CONF_EXPORT_WRITE_SCALE_FIRMWARE,
+        CONF_EXPORT_WRITE_SCALE_PROBE,
+    }
     data = {k: v for k, v in entry.data.items() if k not in measured}
     return data, dict(entry.options)
 

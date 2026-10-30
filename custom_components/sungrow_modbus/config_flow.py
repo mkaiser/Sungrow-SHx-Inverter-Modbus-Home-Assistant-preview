@@ -13,6 +13,7 @@ from modbus_connection import (
     ModbusExceptionError,
     ModbusTcpParams,
     ServerDeviceBusyError,
+    ServerDeviceFailureError,
 )
 import voluptuous as vol
 
@@ -63,7 +64,7 @@ from sungrow_modbus import (
 )
 from sungrow_modbus.addresses import DIRECT_ONLY_PROBE, field_address, read
 from sungrow_modbus.discovery import CONCURRENCY, TIMEOUT
-from sungrow_modbus.fingerprint import OTHER_INVERTER_YES
+from sungrow_modbus.survey_document import OTHER_INVERTER_YES
 from sungrow_modbus.wallbox import probe_units as wallbox_probe_units
 
 from .config_flow_schemas import (
@@ -87,6 +88,7 @@ from .const import (
     CONF_ADD_DEVICES,
     CONF_BATTERY_MAX_POWER,
     CONF_CONTROL_TEST_EXPORT,
+    CONF_CONTROL_TEST_PV_CUT,
     CONF_CONTROL_TEST_RESTART,
     CONF_ENTITY_IDS,
     CONF_EXTERNAL_PLACEMENT,
@@ -105,7 +107,6 @@ from .const import (
     DEFAULT_EXTERNAL_PLACEMENT,
     DEFAULT_NAME,
     DEFAULT_PERMISSIONS,
-    DEVICES_MODE_OFFERED,
     DOMAIN,
     ENTITY_IDS_MIGRATE,
     ENTITY_IDS_NEW,
@@ -114,6 +115,7 @@ from .const import (
     INTERVAL_NEVER,
     MODE_DEVICES,
     MODE_DIAGNOSTICS,
+    ONLY_SURVEY_MODE,
     PLACEMENT_BEHIND_METER,
     PLACEMENT_SEPARATE,
     ROLE_MASTER,
@@ -125,6 +127,7 @@ from .const import (
     SECTION_PERMISSIONS,
     SECTION_POLLING,
     SECTION_SURVEY,
+    SURVEY_ISSUE_URL,
     WALLBOX_TLS_UNIT,
 )
 from .links import wallbox_tls_params
@@ -141,7 +144,7 @@ from .migration import (
 _LOGGER = logging.getLogger(__name__)
 
 
-#: What the gated controls say while `DEVICES_MODE_OFFERED` is off, written
+#: What the gated controls say while `ONLY_SURVEY_MODE` is on, written
 #: once and rendered in two places: the opening step and the options page's
 #: promotion toggle explain the same gate, and a gate explained in two
 #: wordings is a gate somebody will misread. Markdown, because both slots
@@ -161,33 +164,42 @@ _DEVICES_MODE_COMING = (
 #: rather than the restriction.
 _DEVICES_MODE_OPEN = (
     "\n\nBoth answers are fine, and you can change your mind later: picking "
-    "**Diagnostics only** skips the weightiest question in this dialog, "
+    "**the device survey** skips the weightiest question in this dialog, "
     "about which entity IDs to take over, because a reading does not need it."
+)
+
+#: The opening step's first paragraph, which introduces the answer that is
+#: only on the menu while the gate is open.
+_DEVICES_MODE_INTRO = (
+    "**Set up my inverter** is what you want if you came here to see your "
+    "solar production in Home Assistant.\n\n"
 )
 
 
 def _alpha_placeholders() -> dict[str, str]:
     """Return what the two gated dialogs should say about the gate.
 
-    A function rather than a constant because `DEVICES_MODE_OFFERED` is read
+    A function rather than a constant because `ONLY_SURVEY_MODE` is read
     at call time: a module-level dict would freeze the answer at import and
     quietly ignore the flag it exists to report.
 
-    Two keys rather than one because the two places need opposite things when
-    the gate is open. The opening step needs a sentence either way -- it is
-    explaining a choice. The options page's promotion toggle needs one only
-    while promotion is refused; with the gate open there is nothing to say
-    and the helper text beside it is already complete.
+    `mode_choice` and `devices_mode` rather than one key because the two places
+    need opposite things when the gate is open. The opening step needs a
+    sentence either way -- it is explaining a choice, or why there is none.
+    The options page's promotion toggle needs one only while promotion is
+    refused; with the gate open there is nothing to say and the helper text
+    beside it is already complete.
 
-    Both are always present and never absent: an unsubstituted placeholder
+    All are always present and never absent: an unsubstituted placeholder
     renders as the literal `{devices_mode}` in the dialog, which is the one
     outcome worse than either sentence.
     """
     return {
+        "mode_intro": "" if ONLY_SURVEY_MODE else _DEVICES_MODE_INTRO,
         "mode_choice": (
-            _DEVICES_MODE_OPEN if DEVICES_MODE_OFFERED else _DEVICES_MODE_COMING
+            _DEVICES_MODE_COMING if ONLY_SURVEY_MODE else _DEVICES_MODE_OPEN
         ),
-        "devices_mode": "" if DEVICES_MODE_OFFERED else _DEVICES_MODE_COMING,
+        "devices_mode": _DEVICES_MODE_COMING if ONLY_SURVEY_MODE else "",
     }
 
 
@@ -243,11 +255,13 @@ async def _async_probe(
         direct: bool | None
         try:
             await read(unit, DIRECT_ONLY_PROBE)
-        except (ServerDeviceBusyError, ModbusExceptionError) as err:
+        except ModbusExceptionError as err:
             # A refusal is the transport answering, and only a refusal is.
-            # 0x06 is the exception that says "ask me later" rather than
-            # "no such register", so it settles nothing either.
-            direct = None if isinstance(err, ServerDeviceBusyError) else False
+            # 0x06 says "ask me later" rather than "no such register", and so
+            # does 0x04 from a WiNet-S other clients are polling; neither
+            # settles anything.
+            settles_nothing = (ServerDeviceBusyError, ServerDeviceFailureError)
+            direct = None if isinstance(err, settles_nothing) else False
         except (ModbusError, HomeAssistantError):
             # The link did not carry the question. That is not evidence about
             # the register: reading it as a refusal would tell a house with no
@@ -493,14 +507,15 @@ class SungrowConfigFlow(ConfigFlow, domain=DOMAIN):
         sensors, and never mentions migration. It can be promoted to a full
         entry afterwards, which is when the id question is put.
 
-        While `DEVICES_MODE_OFFERED` is off the first answer is not available,
-        and the menu still offers it -- the step it leads to explains why and
-        carries on as diagnostics. A menu option has no disabled state, and a
-        form could only grey the whole control, the working answer with it.
+        While `ONLY_SURVEY_MODE` is on the menu offers only the survey,
+        and its description says why.
         """
+        options = ["setup_diagnostics"]
+        if not ONLY_SURVEY_MODE:
+            options.insert(0, "setup_devices")
         return self.async_show_menu(
             step_id="user",
-            menu_options=["setup_devices", "setup_diagnostics"],
+            menu_options=options,
             # The step description carries placeholders, so the menu has to
             # substitute them -- an unfilled placeholder is rendered literally
             # rather than dropped.
@@ -510,35 +525,16 @@ class SungrowConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_setup_devices(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Set up the inverter properly, with entities."""
-        if not DEVICES_MODE_OFFERED:
-            return await self.async_step_devices_later()
+        """Set up the inverter properly, with entities.
+
+        Off the menu while the gate is shut, and Home Assistant refuses a step
+        id the menu did not offer; the fallback to diagnostics is the rule
+        behind that, in case it ever lets one through.
+        """
+        if ONLY_SURVEY_MODE:
+            return await self.async_step_setup_diagnostics()
         self._mode = MODE_DEVICES
         return await self.async_step_find()
-
-    async def async_step_devices_later(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Say that the ordinary setup is not in this release, and carry on.
-
-        An abort would be the short way to write this and the wrong thing to
-        do to somebody: it closes the dialog, and the way back is to start
-        again and pick the other answer, having been told only that they
-        chose wrong. So this is a step with one button, and the button does
-        the thing they almost certainly want.
-
-        It is also where the refusal actually lives. `_mode` is never set to
-        `MODE_DEVICES` here, so a client posting the menu's step id by hand
-        gets a diagnostics entry rather than a devices one -- the control on
-        the screen is a courtesy and this is the rule.
-        """
-        if user_input is not None:
-            return await self.async_step_setup_diagnostics()
-        return self.async_show_form(
-            step_id="devices_later",
-            data_schema=vol.Schema({}),
-            last_step=False,
-        )
 
     async def async_step_setup_diagnostics(
         self, user_input: dict[str, Any] | None = None
@@ -1336,6 +1332,8 @@ class SungrowConfigFlow(ConfigFlow, domain=DOMAIN):
             description=(
                 "diagnostics" if self._mode == MODE_DIAGNOSTICS else "default"
             ),
+            # hassfest refuses a URL inside a translation string.
+            description_placeholders={"survey_issue_url": SURVEY_ISSUE_URL},
         )
 
 
@@ -1510,7 +1508,7 @@ class SungrowOptionsFlow(OptionsFlow):
                 # The flag is checked as well as the value: a disabled
                 # control is a frontend courtesy, and the payload arrives over
                 # a websocket anybody with a token can write by hand.
-                elif DEVICES_MODE_OFFERED and user_input.get(CONF_ADD_DEVICES):
+                elif not ONLY_SURVEY_MODE and user_input.get(CONF_ADD_DEVICES):
                     # The promotion question is asked on its own page, and
                     # that is deliberate: it decides where years of history
                     # continue, and it does not belong folded into a section
@@ -1567,7 +1565,7 @@ class SungrowOptionsFlow(OptionsFlow):
             # it submits, which is why the default above is what comes back.
             schema[vol.Required(CONF_ADD_DEVICES, default=False)] = BooleanSelector(
                 BooleanSelectorConfig(read_only=True)
-                if not DEVICES_MODE_OFFERED
+                if ONLY_SURVEY_MODE
                 else BooleanSelectorConfig()
             )
 
@@ -1723,11 +1721,11 @@ class SungrowOptionsFlow(OptionsFlow):
     # place either is explained.
 
     def _control_test_section(self) -> Any:
-        """Return the two permissions part B needs, both off by default.
+        """Return the permissions part B needs, each off by default.
 
         They are separate flags rather than one level because they are not
         ordered: somebody who will allow a restart is not thereby somebody who
-        will allow their export to be limited.
+        will allow their export to be limited, or their PV cut.
         """
         options = self.config_entry.options
         return section(
@@ -1740,6 +1738,10 @@ class SungrowOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_CONTROL_TEST_EXPORT,
                         default=options.get(CONF_CONTROL_TEST_EXPORT, False),
+                    ): BooleanSelector(),
+                    vol.Required(
+                        CONF_CONTROL_TEST_PV_CUT,
+                        default=options.get(CONF_CONTROL_TEST_PV_CUT, False),
                     ): BooleanSelector(),
                 }
             ),
@@ -1879,7 +1881,7 @@ class SungrowOptionsFlow(OptionsFlow):
         ran `modbus_sungrow.yaml` has no history and no decision, so the
         entry is simply promoted.
         """
-        if not DEVICES_MODE_OFFERED:
+        if ONLY_SURVEY_MODE:
             return self.async_abort(reason="devices_mode_not_offered")
 
         # Prefer what the entry already settled. A diagnostics entry has
@@ -2082,7 +2084,7 @@ class SungrowOptionsFlow(OptionsFlow):
         direct: bool | None
         try:
             await device.async_read(DIRECT_ONLY_PROBE)
-        except ServerDeviceBusyError:
+        except (ServerDeviceBusyError, ServerDeviceFailureError):
             direct = None
         except ModbusExceptionError:
             direct = False

@@ -21,6 +21,9 @@ need:
 * **which entity ids are in use**, so a migration that half-worked is visible;
 * the **block read test** the survey button last ran, with its time. Not run
   here: it takes minutes through a dongle, and a download is waited on.
+  The **control test** the last run carried goes into the `survey` section
+  for the same reason, and because this download is the link that does not
+  expire.
 
 Serial number and host are redacted: a diagnostics file is written to be
 pasted into a public issue.
@@ -29,13 +32,13 @@ The raw register dump is **off by default** and enabled in the integration's
 options. It performs a full extra read of every mapped address, which through
 a WiNet-S is slow enough to disturb polling, so it is opt-in rather than free.
 
-It also carries a **`fingerprint`** section: a complete capability survey in
-the same format `device-fingerprints/scripts/python/sungrow_survey.py` writes, so
+It also carries a **`survey`** section: a complete capability survey in
+the same format `device-survey/scripts/python/sungrow_survey.py` writes, so
 a user who has the integration running can contribute one by clicking a button
 instead of running Python. Everything else in this file answers "what is wrong
 with mine"; that section answers "what does this model and this firmware
 actually do", which is the question `doc/compatibility.md` exists for. See
-`fingerprint.py`, including what it deliberately does not do.
+`survey_document.py`, including what it deliberately does not do.
 """
 
 from __future__ import annotations
@@ -56,8 +59,8 @@ from sungrow_modbus.inverter.capabilities import OUTPUT_TYPES, known_absent
 
 from .const import CONF_REGISTER_DUMP, CONF_UNIT_ID, CONF_WALLBOX_HOST, DOMAIN
 from .coordinator import COMPONENT_TIERS, SungrowConfigEntry
-from .fingerprint import async_build
 from .migration import DESCRIPTIONS, legacy_entity_id
+from .survey_document import async_build, attach_control_test
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,7 +116,8 @@ async def async_get_config_entry_diagnostics(
     # 19 probe reads, which is small beside the
     # register dump and not free -- an inverter grants very few sessions.
     try:
-        report["fingerprint"] = await async_build(hass, entry)
+        report["survey"] = await async_build(hass, entry)
+        _carry_control_test(report["survey"], runtime, device)
     # Deliberately broad: the report a user came for matters more than any one
     # section of it.
     except Exception as err:  # and deliberately logged, see below
@@ -121,8 +125,8 @@ async def async_get_config_entry_diagnostics(
         # carries the traceback because somebody has to fix it. The person
         # holding a downloaded JSON file is rarely the person who can act on
         # it.
-        _LOGGER.exception("Could not build the fingerprint for %s", entry.title)
-        report["fingerprint"] = {"error": f"{type(err).__name__}: {err}"}
+        _LOGGER.exception("Could not build the survey for %s", entry.title)
+        report["survey"] = {"error": f"{type(err).__name__}: {err}"}
 
     report["block_read_test"] = _last_block_read_test(runtime)
 
@@ -134,7 +138,7 @@ async def async_get_config_entry_diagnostics(
 
 #: What the download says when no survey has measured the blocks since start.
 NO_BLOCK_READ_TEST = (
-    "not run since Home Assistant started. Press Run capability survey on the "
+    "not run since Home Assistant started. Press Run read only diagnosis on the "
     "device page; it measures the blocks and this download then carries the "
     "result"
 )
@@ -162,6 +166,21 @@ def _last_block_read_test(runtime: Any) -> dict[str, Any] | str:
     }
 
 
+def _carry_control_test(document: dict[str, Any], runtime: Any, device: Any) -> None:
+    """Put the last run's control test into a freshly built survey document.
+
+    The download builds part A again but never writes, so part B can only be
+    carried. Without it the notification's promise -- that Download
+    diagnostics holds the same document -- fails for exactly the run that is
+    hardest to repeat. Through the same door as the runner, so the serial
+    check applies here too.
+    """
+    survey = getattr(runtime, "survey", None)
+    block = survey.state.control_test if survey is not None else None
+    if block:
+        attach_control_test(document, block, device)
+
+
 async def async_get_device_diagnostics(
     hass: HomeAssistant, entry: SungrowConfigEntry, device: DeviceEntry
 ) -> dict[str, Any]:
@@ -169,7 +188,7 @@ async def async_get_device_diagnostics(
 
     The battery and the wallbox are devices of their own under the same
     entry, and they get the entry's whole report too: it already carries
-    their sections in `fingerprint`. A per-device split would belong here.
+    their sections in `survey`. A per-device split would belong here.
     """
     return await async_get_config_entry_diagnostics(hass, entry)
 
