@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 import logging
 from typing import Any
@@ -15,7 +15,7 @@ from modbus_connection import (
     ServerDeviceBusyError,
     ServerDeviceFailureError,
 )
-import voluptuous as vol
+import probatio
 
 from homeassistant.components import network
 from homeassistant.components.modbus import async_get_temporary_unit
@@ -253,29 +253,34 @@ async def _async_probe(
     async with async_get_temporary_unit(hass, params, unit_id) as unit:
         inverter = SungrowInverter(unit)
         await inverter.async_update_identity()
-        direct: bool | None
-        try:
-            await read(unit, DIRECT_ONLY_PROBE)
-        except ModbusExceptionError as err:
-            # A refusal is the transport answering, and only a refusal is.
-            # 0x06 says "ask me later" rather than "no such register", and so
-            # does 0x04 from a WiNet-S other clients are polling; neither
-            # settles anything.
-            settles_nothing = (ServerDeviceBusyError, ServerDeviceFailureError)
-            direct = None if isinstance(err, settles_nothing) else False
-        except (ModbusError, HomeAssistantError):
-            # The link did not carry the question. That is not evidence about
-            # the register: reading it as a refusal would tell a house with no
-            # communication module fitted that it has a dongle. No retry here,
-            # deliberately: this runs once per
-            # candidate address in a /24 sweep, so a retry multiplies the
-            # search rather than the certainty. `None` is the honest answer
-            # and the prose says so.
-            direct = None
-        else:
-            direct = True
+        # No retry here, deliberately: this runs once per candidate address
+        # in a /24 sweep, so a retry multiplies the search rather than the
+        # certainty. `None` is the honest answer and the prose says so.
+        direct = await _async_direct(read(unit, DIRECT_ONLY_PROBE))
         battery = await _async_has_battery(unit) if inverter.serial_number else None
     return inverter, direct, battery
+
+
+async def _async_direct(probe: Awaitable[object]) -> bool | None:
+    """Return whether register 6100 says this endpoint is the inverter's own port.
+
+    Three answers. Answered is a cable: no communication module forwards the
+    block. Refused is a module in the path -- a refusal is the transport
+    answering, and only a refusal is. Anything else is `None`: 0x06 says "ask
+    me later" rather than "no such register", and so does 0x04 from a WiNet-S
+    other clients are polling; and a lost, timed-out or desynced read is the
+    link not carrying the question. Reading either as a refusal would tell a
+    house with no module fitted that it has a dongle.
+    """
+    try:
+        await probe
+    except (ServerDeviceBusyError, ServerDeviceFailureError):
+        return None
+    except ModbusExceptionError:
+        return False
+    except (ModbusError, HomeAssistantError, TimeoutError, OSError):
+        return None
+    return True
 
 
 async def _async_has_battery(unit: Any) -> bool | None:
@@ -864,9 +869,9 @@ class SungrowConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         return self.async_show_form(
             step_id="pick",
-            data_schema=vol.Schema(
+            data_schema=probatio.Schema(
                 {
-                    vol.Required(
+                    probatio.Required(
                         CONF_HOST, default=options[0]["value"]
                     ): SelectSelector(
                         SelectSelectorConfig(
@@ -1138,7 +1143,9 @@ class SungrowConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         if user_input is not None:
             return self._async_create(ENTITY_IDS_NEW)
-        return self.async_show_form(step_id="slot_unknown", data_schema=vol.Schema({}))
+        return self.async_show_form(
+            step_id="slot_unknown", data_schema=probatio.Schema({})
+        )
 
     async def async_step_name(
         self, user_input: dict[str, Any] | None = None
@@ -1175,8 +1182,8 @@ class SungrowConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="name",
-            data_schema=vol.Schema(
-                {vol.Optional(CONF_NAME, default=self._suggested_name()): str}
+            data_schema=probatio.Schema(
+                {probatio.Optional(CONF_NAME, default=self._suggested_name()): str}
             ),
             description_placeholders={
                 "count": str(self._others),
@@ -1545,7 +1552,7 @@ class SungrowOptionsFlow(OptionsFlow):
         )
 
     @callback
-    def _async_options_schema(self) -> vol.Schema:
+    def _async_options_schema(self) -> probatio.Schema:
         """Build the one form, in the order somebody reads it.
 
         Polling first because it is what people come here for, and the
@@ -1566,28 +1573,30 @@ class SungrowOptionsFlow(OptionsFlow):
             # owner can see that promotion exists and is coming. `read_only`
             # makes the frontend disable the field and leave it out of what
             # it submits, which is why the default above is what comes back.
-            schema[vol.Required(CONF_ADD_DEVICES, default=False)] = BooleanSelector(
-                BooleanSelectorConfig(read_only=True)
-                if ONLY_SURVEY_MODE
-                else BooleanSelectorConfig()
+            schema[probatio.Required(CONF_ADD_DEVICES, default=False)] = (
+                BooleanSelector(
+                    BooleanSelectorConfig(read_only=True)
+                    if ONLY_SURVEY_MODE
+                    else BooleanSelectorConfig()
+                )
             )
 
         else:
             # Changing it renames the entities, which `async_step_entity_ids`
             # spells out before doing.
-            schema[vol.Required(CONF_ENTITY_IDS, default=self._entity_id_style())] = (
-                _entity_id_style_selector()
-            )
+            schema[
+                probatio.Required(CONF_ENTITY_IDS, default=self._entity_id_style())
+            ] = _entity_id_style_selector()
 
-        schema[vol.Required(SECTION_POLLING)] = section(
+        schema[probatio.Required(SECTION_POLLING)] = section(
             self._async_polling_schema(current), {"collapsed": False}
         )
-        schema[vol.Required(SECTION_PERMISSIONS)] = self._permissions_section()
-        schema[vol.Required(SECTION_EXTERNAL)] = self._external_section()
-        schema[vol.Required(SECTION_ADVANCED)] = self._advanced_section()
-        schema[vol.Required(SECTION_SURVEY)] = self._survey_section()
-        schema[vol.Required(SECTION_CONTROL_TEST)] = self._control_test_section()
-        return vol.Schema(schema)
+        schema[probatio.Required(SECTION_PERMISSIONS)] = self._permissions_section()
+        schema[probatio.Required(SECTION_EXTERNAL)] = self._external_section()
+        schema[probatio.Required(SECTION_ADVANCED)] = self._advanced_section()
+        schema[probatio.Required(SECTION_SURVEY)] = self._survey_section()
+        schema[probatio.Required(SECTION_CONTROL_TEST)] = self._control_test_section()
+        return probatio.Schema(schema)
 
     def _permissions_section(self) -> Any:
         """Return the who-may-change-what ladder, one row per permission.
@@ -1602,9 +1611,9 @@ class SungrowOptionsFlow(OptionsFlow):
             **self.config_entry.options.get(CONF_PERMISSIONS, {}),
         }
         return section(
-            vol.Schema(
+            probatio.Schema(
                 {
-                    vol.Required(
+                    probatio.Required(
                         permission,
                         default=permissions[permission],
                     ): SelectSelector(
@@ -1634,9 +1643,9 @@ class SungrowOptionsFlow(OptionsFlow):
         """
         options = self.config_entry.options
         return section(
-            vol.Schema(
+            probatio.Schema(
                 {
-                    vol.Optional(
+                    probatio.Optional(
                         CONF_EXTERNAL_SOURCES,
                         default=list(options.get(CONF_EXTERNAL_SOURCES, ())),
                     ): EntitySelector(
@@ -1646,7 +1655,7 @@ class SungrowOptionsFlow(OptionsFlow):
                             multiple=True,
                         )
                     ),
-                    vol.Required(
+                    probatio.Required(
                         CONF_EXTERNAL_PLACEMENT,
                         default=options.get(
                             CONF_EXTERNAL_PLACEMENT, DEFAULT_EXTERNAL_PLACEMENT
@@ -1667,12 +1676,12 @@ class SungrowOptionsFlow(OptionsFlow):
         """Return the settings that change what the entities *are*, not how often."""
         options = self.config_entry.options
         return section(
-            vol.Schema(
+            probatio.Schema(
                 {
-                    vol.Required(
+                    probatio.Required(
                         CONF_BATTERY_MAX_POWER,
                         default=options.get(CONF_BATTERY_MAX_POWER, 0),
-                    ): vol.All(
+                    ): probatio.All(
                         NumberSelector(
                             NumberSelectorConfig(
                                 mode=NumberSelectorMode.BOX,
@@ -1682,14 +1691,14 @@ class SungrowOptionsFlow(OptionsFlow):
                                 unit_of_measurement="W",
                             )
                         ),
-                        vol.Coerce(int),
+                        probatio.Coerce(int),
                     ),
-                    vol.Required(
+                    probatio.Required(
                         CONF_REGISTER_DUMP,
                         default=options.get(CONF_REGISTER_DUMP, False),
                     ): BooleanSelector(),
                     # Suggested rather than defaulted, so it can be cleared.
-                    vol.Optional(
+                    probatio.Optional(
                         CONF_WALLBOX_HOST,
                         description={
                             "suggested_value": options.get(CONF_WALLBOX_HOST, "")
@@ -1732,21 +1741,21 @@ class SungrowOptionsFlow(OptionsFlow):
         """
         options = self.config_entry.options
         return section(
-            vol.Schema(
+            probatio.Schema(
                 {
-                    vol.Required(
+                    probatio.Required(
                         CONF_CONTROL_TEST_RESTART,
                         default=options.get(
                             CONF_CONTROL_TEST_RESTART, CONTROL_TEST_PERMISSION_DEFAULT
                         ),
                     ): BooleanSelector(),
-                    vol.Required(
+                    probatio.Required(
                         CONF_CONTROL_TEST_EXPORT,
                         default=options.get(
                             CONF_CONTROL_TEST_EXPORT, CONTROL_TEST_PERMISSION_DEFAULT
                         ),
                     ): BooleanSelector(),
-                    vol.Required(
+                    probatio.Required(
                         CONF_CONTROL_TEST_PV_CUT,
                         default=options.get(
                             CONF_CONTROL_TEST_PV_CUT, CONTROL_TEST_PERMISSION_DEFAULT
@@ -1759,7 +1768,7 @@ class SungrowOptionsFlow(OptionsFlow):
 
     def _entity_id_style(self) -> str:
         """Return which ids this entry's entities are on now."""
-        return self.config_entry.data.get(CONF_ENTITY_IDS, ENTITY_IDS_NEW)
+        return str(self.config_entry.data.get(CONF_ENTITY_IDS, ENTITY_IDS_NEW))
 
     async def _async_slot(self) -> str | None:
         """Return the entry's YAML slot, measuring again where none is known.
@@ -1835,7 +1844,7 @@ class SungrowOptionsFlow(OptionsFlow):
         )
         return self.async_show_form(
             step_id="entity_ids_legacy" if to_legacy else "entity_ids_modern",
-            data_schema=vol.Schema({}),
+            data_schema=probatio.Schema({}),
             errors=errors,
             description_placeholders=_switch_placeholders(self._switch, live),
         )
@@ -1944,7 +1953,9 @@ class SungrowOptionsFlow(OptionsFlow):
         """Say why the YAML package's ids are not offered, then promote without."""
         if user_input is not None:
             return await self._async_promote(ENTITY_IDS_NEW)
-        return self.async_show_form(step_id="slot_unknown", data_schema=vol.Schema({}))
+        return self.async_show_form(
+            step_id="slot_unknown", data_schema=probatio.Schema({})
+        )
 
     async def _async_promote(self, entity_ids: str) -> ConfigFlowResult:
         """Rewrite the entry's data and let the reload build the entities.
@@ -1977,7 +1988,7 @@ class SungrowOptionsFlow(OptionsFlow):
         )
 
     @callback
-    def _async_polling_schema(self, current: dict[str, int]) -> vol.Schema:
+    def _async_polling_schema(self, current: dict[str, int]) -> probatio.Schema:
         """Return one interval field per tier.
 
         Nothing between 1 and 4 seconds is offered. The specification warns
@@ -1986,9 +1997,11 @@ class SungrowOptionsFlow(OptionsFlow):
         package's fastest tier -- going lower buys nothing and spends a
         connection the inverter has few of.
         """
-        return vol.Schema(
+        return probatio.Schema(
             {
-                vol.Required(tier, default=current.get(tier, default)): vol.All(
+                probatio.Required(
+                    tier, default=current.get(tier, default)
+                ): probatio.All(
                     NumberSelector(
                         NumberSelectorConfig(
                             mode=NumberSelectorMode.BOX,
@@ -1998,8 +2011,8 @@ class SungrowOptionsFlow(OptionsFlow):
                             unit_of_measurement="s",
                         )
                     ),
-                    vol.Coerce(int),
-                    vol.Any(INTERVAL_NEVER, vol.Range(min=INTERVAL_MINIMUM)),
+                    probatio.Coerce(int),
+                    probatio.Any(INTERVAL_NEVER, probatio.Range(min=INTERVAL_MINIMUM)),
                 )
                 for tier, default in DEFAULT_INTERVALS.items()
             }
@@ -2090,17 +2103,7 @@ class SungrowOptionsFlow(OptionsFlow):
         device = next(iter(runtime.coordinators.values())).device
         model = device.model or "an unidentified model"
 
-        direct: bool | None
-        try:
-            await device.async_read(DIRECT_ONLY_PROBE)
-        except (ServerDeviceBusyError, ServerDeviceFailureError):
-            direct = None
-        except ModbusExceptionError:
-            direct = False
-        except (ModbusError, HomeAssistantError, TimeoutError, OSError):
-            direct = None
-        else:
-            direct = True
+        direct = await _async_direct(device.async_read(DIRECT_ONLY_PROBE))
 
         if direct is True:
             route = (
