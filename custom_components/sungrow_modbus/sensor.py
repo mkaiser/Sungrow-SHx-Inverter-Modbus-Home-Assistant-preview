@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
+from datetime import timedelta
+
+from homeassistant.components.sensor import RestoreSensor, SensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from sungrow_modbus.energy_integral import EnergyIntegral
 from sungrow_modbus.hybrid_inverter.faults import active
 from sungrow_modbus.hybrid_inverter.smoothing import TimeWeightedAverage
 
-from .battery_descriptions import CELL_DESCRIPTIONS, PACK_DESCRIPTIONS
-from .const import CONF_MODE, MODE_DEVICES, MODE_DIAGNOSTICS
-from .coordinator import (
-    SungrowConfigEntry,
-    SungrowRuntimeData,
-    SungrowStringInverterCoordinator,
+from .battery_descriptions import (
+    CELL_DESCRIPTIONS,
+    MODULE_DESCRIPTIONS,
+    PACK_DESCRIPTIONS,
 )
+from .const import CONF_MODE, MODE_DEVICES, MODE_DIAGNOSTICS
+from .coordinator import SungrowConfigEntry, SungrowRuntimeData
 from .derived_descriptions import DERIVED_SENSORS
 from .entity import (
     SungrowBatteryEntity,
@@ -23,6 +25,7 @@ from .entity import (
     SungrowEntity,
     SungrowExternalSensorDescription,
     SungrowSensorDescription,
+    SungrowStringInverterEntity,
     as_reading,
 )
 from .external import combined, external_power
@@ -63,17 +66,18 @@ async def async_setup_entry(
         return
 
     # An SG: its own map, and nothing else on this entry. An entity only for
-    # a field that read a value, because tracker and phase counts differ by
+    # a field the machine serves, because tracker and phase counts differ by
     # model and nothing ever removes an entity once made.
     if runtime_data.is_string_inverter:
         async_add_entities(
-            SungrowStringInverterSensor(
-                runtime_data.string_inverter[description.component], description
-            )
+            (
+                SungrowStringInverterEnergySensor
+                if description.integrated
+                else SungrowStringInverterSensor
+            )(runtime_data.string_inverter[description.component], description)
             for description in STRING_INVERTER_DESCRIPTIONS
             if description.component in runtime_data.string_inverter
-            and runtime_data.inverter_coordinator.device.field(description.field)
-            is not None
+            and runtime_data.inverter_coordinator.device.serves(description.field)
         )
         return
 
@@ -106,6 +110,8 @@ async def async_setup_entry(
         descriptions = PACK_DESCRIPTIONS
         if runtime_data.battery_has_cells:
             descriptions += CELL_DESCRIPTIONS
+        for module in runtime_data.battery_modules:
+            descriptions += MODULE_DESCRIPTIONS[module]
         async_add_entities(
             SungrowBatterySensor(battery, description) for description in descriptions
         )
@@ -125,13 +131,96 @@ async def async_setup_entry(
 
 def _sensor_class(
     description: SungrowSensorDescription,
-) -> type[SungrowSensor | SungrowFlagsSensor]:
+) -> type[SungrowSensor | SungrowFlagsSensor | SungrowEnergySensor]:
     """Return the entity class an inverter sensor description asks for."""
     if description.flags:
         return SungrowFlagsSensor
     if description.history:
         return SungrowHistorySensor
+    if description.integrated:
+        return SungrowEnergySensor
     return SungrowSensor
+
+
+#: The shortest gap an energy integral bridges, in seconds, however fast the
+#: polling: two or three missed polls at the default tiers.
+_MIN_GAP = 60.0
+
+
+class _IntegratesPower(RestoreSensor):
+    """A power reading's running integral, in kWh, kept across restarts.
+
+    Shared by the hybrid's and the SG's tracker energy. Sampled on every
+    update of the coordinator that reads the power, never between them; the
+    arithmetic, and what it does across a gap, is
+    `sungrow_modbus.energy_integral`.
+
+    A gap is longer than three polls of that coordinator, or a minute,
+    whichever is longer: a missed poll or two is bridged, an hour offline is
+    not. Restarting Home Assistant is always a gap, since the clock is the
+    event loop's.
+    """
+
+    _integral: EnergyIntegral | None = None
+
+    def _power(self) -> float | None:
+        """Return the power to integrate now, in W, or None."""
+        raise NotImplementedError
+
+    def _update_interval(self) -> timedelta | None:
+        raise NotImplementedError
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the total, or None until the entity has been added."""
+        return None if self._integral is None else round(self._integral.total_kwh, 4)
+
+    async def _async_start_integral(self) -> None:
+        """Pick up where the last run left off, then take the first sample."""
+        total = 0.0
+        last = await self.async_get_last_sensor_data()
+        if last is not None and isinstance(last.native_value, (int, float)):
+            total = max(float(last.native_value), 0.0)
+        elif last is not None and last.native_value is not None:
+            try:
+                total = max(float(str(last.native_value)), 0.0)
+            except ValueError:
+                total = 0.0
+        interval = self._update_interval()
+        polls = 3 * interval.total_seconds() if interval else 0.0
+        self._integral = EnergyIntegral(total, max_gap=max(polls, _MIN_GAP))
+        self._sample()
+
+    @callback
+    def _sample(self) -> None:
+        """Feed the current power into the integral."""
+        if self._integral is not None:
+            self._integral.update(self.hass.loop.time(), self._power())
+
+
+class SungrowEnergySensor(SungrowEntity, _IntegratesPower):
+    """Energy through one of the hybrid's trackers, from its derived power."""
+
+    entity_description: SungrowSensorDescription
+
+    def _power(self) -> float | None:
+        """Return the tracker's power, or None while the entity is unavailable."""
+        value = as_reading(self.native_value_source) if self.available else None
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def _update_interval(self) -> timedelta | None:
+        return self.coordinator.update_interval
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the total, then start sampling."""
+        await super().async_added_to_hass()
+        await self._async_start_integral()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Add this poll to the total, then write state."""
+        self._sample()
+        super()._handle_coordinator_update()
 
 
 class SungrowWallboxSensor(SungrowDeviceEntity, SensorEntity):
@@ -145,46 +234,42 @@ class SungrowWallboxSensor(SungrowDeviceEntity, SensorEntity):
         return as_reading(self.native_value_source)
 
 
-class SungrowStringInverterSensor(
-    CoordinatorEntity[SungrowStringInverterCoordinator], SensorEntity
-):
-    """A sensor reading one value off an SG.
+class SungrowStringInverterSensor(SungrowStringInverterEntity, SensorEntity):
+    """A sensor reading one value off an SG."""
 
-    Its own small base rather than `SungrowEntity`, which is built on the
-    hybrid's map: capabilities, derived values, writes. The unique id is
-    `{serial}_{key}`, the inverter's own shape, and every key starts `sg_`.
-    """
-
-    _attr_has_entity_name = True
     entity_description: SungrowSensorDescription
-
-    def __init__(
-        self,
-        coordinator: SungrowStringInverterCoordinator,
-        entity_description: SungrowSensorDescription,
-    ) -> None:
-        """Initialize the entity."""
-        super().__init__(coordinator)
-        self.entity_description = entity_description
-        serial = coordinator.device.serial_number
-        assert serial is not None
-        self._attr_unique_id = f"{serial}_{entity_description.key}"
-        self._attr_device_info = coordinator.device_info
-
-    @property
-    def available(self) -> bool:
-        """Whether the block this entity reads answered its last poll."""
-        if not super().available:
-            return False
-        report = self.coordinator.data
-        if report is None:
-            return False
-        return self.entity_description.component not in report.failed
 
     @property
     def native_value(self) -> float | int | str | None:
         """Return the reading, or None where the device has none."""
         return as_reading(self.coordinator.device.field(self.entity_description.field))
+
+
+class SungrowStringInverterEnergySensor(SungrowStringInverterEntity, _IntegratesPower):
+    """Energy through one of an SG's trackers, from voltage times current."""
+
+    entity_description: SungrowSensorDescription
+
+    def _power(self) -> float | None:
+        """Return the tracker's power, or None while the entity is unavailable."""
+        if not self.available:
+            return None
+        value = as_reading(self.coordinator.device.field(self.entity_description.field))
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def _update_interval(self) -> timedelta | None:
+        return self.coordinator.update_interval
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the total, then start sampling."""
+        await super().async_added_to_hass()
+        await self._async_start_integral()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Add this poll to the total, then write state."""
+        self._sample()
+        super()._handle_coordinator_update()
 
 
 class SungrowBatterySensor(SungrowBatteryEntity, SensorEntity):

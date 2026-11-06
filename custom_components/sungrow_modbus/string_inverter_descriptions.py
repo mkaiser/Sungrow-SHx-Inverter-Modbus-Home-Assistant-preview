@@ -8,10 +8,10 @@ resolves to a real field or property of `SungrowStringInverter`, and no
 `_raw` code gets an entity -- its decoded property does.
 
 **What gets an entity is decided per device**, after the first poll: an SG5.0RS
-has two trackers and one phase, an SG110CX twelve and three, and the map is
-the protocol's, unmeasured. A field that read nothing -- refused, or the
-protocol's "unavailable" -- gets no entity, rather than one that is
-unavailable forever.
+has two trackers and one phase, an SG110CX nine and three. A field that
+read nothing -- refused, or the protocol's "unavailable" -- gets no entity,
+rather than one that is unavailable forever; nor does a phase or tracker the
+model lacks, which an SG answers as 0 (`SungrowStringInverter.serves`).
 
 **Nothing is writable.** The power limitation is shown so an owner can see a
 curtailment is set; writing it waits for a watched write.
@@ -19,6 +19,7 @@ curtailment is set; writing it waits for a watched write.
 
 from __future__ import annotations
 
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import (
     PERCENTAGE,
@@ -34,7 +35,7 @@ from homeassistant.const import (
     UnitOfTime,
 )
 
-from .entity import SungrowSensorDescription
+from .entity import SungrowBinarySensorDescription, SungrowSensorDescription
 
 #: The prefix every key carries, so no translation key meets a hybrid's.
 PREFIX = "sg_"
@@ -48,8 +49,10 @@ def _sensor(
     state_class: SensorStateClass | None = SensorStateClass.MEASUREMENT,
     *,
     category: EntityCategory | None = None,
+    key: str | None = None,
 ) -> SungrowSensorDescription:
-    key = f"{PREFIX}{field}"
+    """Describe one value; `key` names it where it is not the field's name."""
+    key = f"{PREFIX}{key or field}"
     return SungrowSensorDescription(
         key=key,
         component=component,
@@ -62,7 +65,9 @@ def _sensor(
     )
 
 
-def _energy(component: str, field: str) -> SungrowSensorDescription:
+def _energy(
+    component: str, field: str, *, key: str | None = None
+) -> SungrowSensorDescription:
     """Describe a meter that only climbs, or resets at midnight or month end.
 
     `total_increasing` for both: a daily total's reset is exactly the reset
@@ -74,10 +79,18 @@ def _energy(component: str, field: str) -> SungrowSensorDescription:
         SensorDeviceClass.ENERGY,
         UnitOfEnergy.KILO_WATT_HOUR,
         SensorStateClass.TOTAL_INCREASING,
+        key=key,
     )
 
 
 def _tracker(component: str, number: int) -> tuple[SungrowSensorDescription, ...]:
+    """Describe one tracker: voltage, current, their product, and its integral.
+
+    The power is computed (`_tracker_power` in the library), and the energy
+    is that power integrated over every poll, since no SG register counts
+    energy per tracker.
+    """
+    key = f"{PREFIX}mppt{number}_energy"
     return (
         _sensor(
             component,
@@ -90,6 +103,23 @@ def _tracker(component: str, number: int) -> tuple[SungrowSensorDescription, ...
             f"mppt{number}_current",
             SensorDeviceClass.CURRENT,
             UnitOfElectricCurrent.AMPERE,
+        ),
+        _sensor(
+            component,
+            f"mppt{number}_power",
+            SensorDeviceClass.POWER,
+            UnitOfPower.WATT,
+        ),
+        SungrowSensorDescription(
+            key=key,
+            component=component,
+            field=f"mppt{number}_power",
+            translation_key=key,
+            integrated=True,
+            device_class=SensorDeviceClass.ENERGY,
+            native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            suggested_display_precision=2,
         ),
     )
 
@@ -151,9 +181,10 @@ STRING_INVERTER_DESCRIPTIONS: tuple[SungrowSensorDescription, ...] = (
     *_phase("c"),
     # -- what it has made ---------------------------------------------------
     _energy("sg_realtime", "daily_pv_generation"),
-    _energy("sg_realtime", "total_pv_generation"),
+    # One lifetime total, from 5144 in 0.1 kWh rather than 5004 in whole kWh,
+    # which steps the Energy dashboard's hourly bars by a kWh at a time.
+    _energy("sg_precision", "total_pv_generation_precise", key="total_pv_generation"),
     _energy("sg_trackers", "monthly_pv_generation"),
-    _energy("sg_precision", "total_pv_generation_precise"),
     _sensor(
         "sg_realtime",
         "total_running_time",
@@ -222,5 +253,17 @@ STRING_INVERTER_DESCRIPTIONS: tuple[SungrowSensorDescription, ...] = (
         "power_limitation_setting",
         unit=PERCENTAGE,
         category=EntityCategory.DIAGNOSTIC,
+    ),
+)
+
+#: States, where a boolean is the honest shape, as on the hybrid. The power
+#: limitation's on/off is already the `power_limitation` sensor.
+STRING_INVERTER_BINARY_DESCRIPTIONS: tuple[SungrowBinarySensorDescription, ...] = (
+    SungrowBinarySensorDescription(
+        key=f"{PREFIX}fault_reported",
+        component="sg_realtime",
+        field="fault_reported",
+        translation_key=f"{PREFIX}fault_reported",
+        device_class=BinarySensorDeviceClass.PROBLEM,
     ),
 )

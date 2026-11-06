@@ -50,6 +50,7 @@ from sungrow_modbus.wallbox import (
 )
 from sungrow_modbus.wallbox.device import SungrowWallbox
 
+from .battery_descriptions import MODULE_DESCRIPTIONS
 from .const import (
     CONF_ENTITY_IDS,
     CONF_EXPORT_WRITE_SCALE,
@@ -97,6 +98,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
+    Platform.BUTTON,
     Platform.NUMBER,
     Platform.SELECT,
     Platform.SENSOR,
@@ -124,7 +126,7 @@ DIAGNOSTIC_PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.SENSOR]
 
 #: What an ordinary SG entry sets up: its readings, and nothing that writes.
 #: Read only by decision, until a write has been watched on one.
-STRING_INVERTER_PLATFORMS: list[Platform] = [Platform.SENSOR]
+STRING_INVERTER_PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
 
 
 def _platforms(entry: SungrowConfigEntry) -> list[Platform]:
@@ -441,7 +443,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SungrowConfigEntry) -> b
         entry.title,
         ", ".join(sorted(c.value for c in capabilities)) or "none",
     )
-    battery, battery_has_cells = await _async_battery(hass, entry, inverter, intervals)
+    battery, battery_has_cells, battery_modules = await _async_battery(
+        hass, entry, inverter, intervals
+    )
     # Only now: the pack is on a unit of its own, which the inverter's
     # registers cannot see, and an SBR is what lets a battery's write bounds
     # come from its datasheet rather than from BMS current times voltage.
@@ -459,10 +463,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SungrowConfigEntry) -> b
         capabilities,
         intervals,
         firmware=firmware,
+        output_type=inverter.output_type,
         inverter_device_id=inverter_device_id,
         battery=battery,
         wallbox=wallbox,
         battery_has_cells=battery_has_cells,
+        battery_modules=battery_modules,
         legacy_ids=legacy_ids,
         # Options rather than probed facts, and the only entities in this
         # integration whose existence an owner decides. Read here so a
@@ -589,7 +595,7 @@ async def _async_battery(
     entry: SungrowConfigEntry,
     inverter: SungrowInverter,
     intervals: dict[str, int],
-) -> tuple[SungrowBatteryCoordinator | None, bool]:
+) -> tuple[SungrowBatteryCoordinator | None, bool, tuple[int, ...]]:
     """Find a Sungrow pack on this endpoint and start polling it, or not.
 
     Which unit id it answers on is **not** a setting and is never asked. It
@@ -611,11 +617,11 @@ async def _async_battery(
         # Not fatal, and not even worth a warning. The inverter is already
         # set up and working; this is an optional device that did not answer.
         _LOGGER.debug("%s: could not probe for a battery pack: %s", entry.title, err)
-        return None, False
+        return None, False, ()
 
     if pack_unit is None:
         _LOGGER.debug("%s: no Sungrow battery pack on this endpoint", entry.title)
-        return None, False
+        return None, False, ()
 
     battery = SungrowBattery(_unit_factory(hass, entry)(pack_unit), pack_unit)
     coordinator = SungrowBatteryCoordinator(
@@ -625,6 +631,9 @@ async def _async_battery(
         inverter,
         timedelta(seconds=intervals.get("medium", DEFAULT_INTERVALS["medium"])),
     )
+    # The first read takes the module block too, to count the modules; the
+    # poll keeps it only while one of their entities is enabled.
+    battery.poll_modules = True
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady:
@@ -636,7 +645,7 @@ async def _async_battery(
             entry.title,
             pack_unit,
         )
-        return None, False
+        return None, False, ()
 
     _LOGGER.debug(
         "%s: battery pack on unit %s, cell data %s",
@@ -644,7 +653,31 @@ async def _async_battery(
         pack_unit,
         "present" if battery.has_cell_data else "absent on this path",
     )
-    return coordinator, battery.has_cell_data
+    modules = battery.modules.fitted_modules
+    battery.poll_modules = _module_entity_enabled(hass, coordinator, modules)
+    return coordinator, battery.has_cell_data, modules
+
+
+def _module_entity_enabled(
+    hass: HomeAssistant,
+    coordinator: SungrowBatteryCoordinator,
+    modules: tuple[int, ...],
+) -> bool:
+    """Whether any of these modules' entities is enabled in the registry.
+
+    Asked at setup only, which is enough: enabling an entity reloads the
+    entry. A first setup finds none, the entities being disabled by default.
+    """
+    registry = er.async_get(hass)
+    for module in modules:
+        for description in MODULE_DESCRIPTIONS[module]:
+            entity_id = registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{coordinator.inverter_serial}_{description.key}"
+            )
+            entity = registry.async_get(entity_id) if entity_id else None
+            if entity is not None and entity.disabled_by is None:
+                return True
+    return False
 
 
 async def _async_wallbox(
@@ -758,7 +791,7 @@ def _async_preview_notice(hass: HomeAssistant) -> None:
         translation_key=PREVIEW_ISSUE,
         learn_more_url=(
             "https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant"
-            "/blob/proper-ha-integration/doc/entity_name_review.md"
+            "/blob/proper-ha-integration/doc/entity_names.md"
         ),
     )
 

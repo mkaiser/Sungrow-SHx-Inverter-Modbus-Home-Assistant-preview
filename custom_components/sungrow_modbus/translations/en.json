@@ -18,7 +18,7 @@
     "step": {
       "entity_ids": {
         "title": "Existing entities found",
-        "description": "Home Assistant found **{count} entities** from the `modbus_sungrow.yaml` package, such as `{example}`. Your recorder history, your statistics and every dashboard card are stored against those entity IDs.\n\n{status}\n\n**Migrate my existing entities** takes those IDs over. History and statistics carry on uninterrupted and your dashboards keep working unchanged. Nothing is copied and nothing is deleted.\n\n**Start fresh** gives this inverter its own IDs, such as `sensor.sh10rt_total_dc_power`. Your old history stays where it is, under the old IDs, and your dashboards keep pointing at it.\n\nEither way the entities are identical in every other respect.",
+        "description": "Home Assistant found **{count} entities** from the `modbus_sungrow.yaml` package, such as `{example}`. Your recorder history, your statistics and every dashboard card are stored against those entity IDs.\n\n{status}\n\n**Migrate my existing entities** takes those IDs over. History and statistics carry on uninterrupted and your dashboards keep working unchanged. Nothing is copied and nothing is deleted.\n\n**Start fresh** gives this inverter its own IDs, such as `sensor.sh10rt_total_pv_input_power`. Your old history stays where it is, under the old IDs, and your dashboards keep pointing at it.\n\nEither way the entities are identical in every other respect.",
         "data": {
           "entity_ids": "Entity IDs"
         },
@@ -28,7 +28,7 @@
       },
       "slot_unknown": {
         "title": "Existing entities found",
-        "description": "This house ran the YAML package for more than one inverter, and Home Assistant cannot tell which of them this one was. The package's serial sensors are what say so, and neither the running package nor the recorded history has this inverter's serial.\n\nSo the YAML package's entity IDs are not offered: taking the wrong set would give this inverter another inverter's history. **Submit** sets it up with its own IDs, such as `sensor.sh10rt_total_dc_power`.\n\nTo keep its old IDs, put the YAML package back for one restart, so this inverter's serial is recorded, then remove it and restart again. **Configure** can then switch this inverter to its old IDs; the serial stays on record for the recorder's retention, ten days unless you changed it."
+        "description": "This house ran the YAML package for more than one inverter, and Home Assistant cannot tell which of them this one was. The package's serial sensors are what say so, and neither the running package nor the recorded history has this inverter's serial.\n\nSo the YAML package's entity IDs are not offered: taking the wrong set would give this inverter another inverter's history. **Submit** sets it up with its own IDs, such as `sensor.sh10rt_total_pv_input_power`.\n\nTo keep its old IDs, put the YAML package back for one restart, so this inverter's serial is recorded, then remove it and restart again. **Configure** can then switch this inverter to its old IDs; the serial stays on record for the recorder's retention, ten days unless you changed it."
       },
       "find": {
         "title": "Where is the inverter?",
@@ -161,7 +161,10 @@
         "name": "Active power limitation"
       },
       "alarm_reported": {
-        "name": "Alarm reported"
+        "name": "Any alarm"
+      },
+      "apl_shutdown_at_zero": {
+        "name": "Shutdown inverter when limited to 0 % power"
       },
       "battery_charging": {
         "name": "Battery charging"
@@ -214,17 +217,23 @@
       "pv_power_limitation_enabled": {
         "name": "PV power limitation"
       },
+      "sg_fault_reported": {
+        "name": "Fault reported"
+      },
       "wallbox_charging": {
         "name": "Charging"
       },
       "wallbox_enabled": {
-        "name": "Enabled"
+        "name": "Charger enabled"
       },
       "weekend_discharge": {
         "name": "Weekend discharge"
       }
     },
     "button": {
+      "force_startup": {
+        "name": "Force startup"
+      },
       "run_control_test": {
         "name": "Run complete diagnosis and tests"
       },
@@ -243,10 +252,10 @@
         "name": "Battery forced charge/discharge power"
       },
       "battery_max_charge_power": {
-        "name": "Battery max charge power"
+        "name": "Battery max charging power"
       },
       "battery_max_discharge_power": {
-        "name": "Battery max discharge power"
+        "name": "Battery max discharging power"
       },
       "battery_max_soc": {
         "name": "Battery max SoC"
@@ -258,7 +267,7 @@
         "name": "Battery reserved SoC for backup"
       },
       "export_power_limit": {
-        "name": "Export power limit"
+        "name": "Feed-in limit"
       },
       "forced_charging_target_soc_1": {
         "name": "Forced charging target SoC 1"
@@ -269,7 +278,7 @@
     },
     "select": {
       "battery_forced_charge_discharge": {
-        "name": "Battery forced charge discharge",
+        "name": "Battery forced charge/discharge",
         "state": {
           "stop": "Stop",
           "charge": "Forced charge",
@@ -293,7 +302,7 @@
         }
       },
       "load_adjustment_mode": {
-        "name": "Load adjustment mode",
+        "name": "Load control mode",
         "state": {
           "timing": "Timing",
           "on_off": "On/off",
@@ -307,16 +316,16 @@
         "name": "Active power limitation ratio"
       },
       "active_power_limitation_raw": {
-        "name": "Active power limitation raw"
+        "name": "Active power limitation code"
       },
       "apl_shutdown_at_zero_raw": {
-        "name": "Active power limitation shutdown at zero"
+        "name": "Shutdown inverter when limited to 0 % power code"
       },
       "backup_frequency": {
         "name": "Backup frequency"
       },
       "backup_mode_raw": {
-        "name": "Backup mode raw"
+        "name": "Backup mode code"
       },
       "backup_phase_a_current": {
         "name": "Backup phase A current"
@@ -391,7 +400,7 @@
         "name": "Battery firmware version"
       },
       "battery_forced_charge_discharge_cmd_raw": {
-        "name": "Battery forced charge/discharge command raw"
+        "name": "Battery forced charge/discharge command code"
       },
       "battery_forced_charge_discharge_power": {
         "name": "Battery forced charge/discharge power"
@@ -403,7 +412,7 @@
         "name": "Battery level (nominal)"
       },
       "battery_max_cell_module": {
-        "name": "Highest cell module"
+        "name": "Module with highest cell"
       },
       "battery_max_cell_number": {
         "name": "Highest cell number"
@@ -412,10 +421,10 @@
         "name": "Highest cell voltage"
       },
       "battery_max_charge_power": {
-        "name": "Battery max charge power"
+        "name": "Battery max charging power"
       },
       "battery_max_discharge_power": {
-        "name": "Battery max discharge power"
+        "name": "Battery max discharging power"
       },
       "battery_max_module_temperature": {
         "name": "Warmest module temperature"
@@ -427,7 +436,7 @@
         "name": "Battery max SoC"
       },
       "battery_min_cell_module": {
-        "name": "Lowest cell module"
+        "name": "Module with lowest cell"
       },
       "battery_min_cell_number": {
         "name": "Lowest cell number"
@@ -444,6 +453,54 @@
       "battery_min_soc": {
         "name": "Battery min SoC"
       },
+      "battery_module_1_max_cell_voltage": {
+        "name": "Module 1 highest cell voltage"
+      },
+      "battery_module_1_min_cell_voltage": {
+        "name": "Module 1 lowest cell voltage"
+      },
+      "battery_module_2_max_cell_voltage": {
+        "name": "Module 2 highest cell voltage"
+      },
+      "battery_module_2_min_cell_voltage": {
+        "name": "Module 2 lowest cell voltage"
+      },
+      "battery_module_3_max_cell_voltage": {
+        "name": "Module 3 highest cell voltage"
+      },
+      "battery_module_3_min_cell_voltage": {
+        "name": "Module 3 lowest cell voltage"
+      },
+      "battery_module_4_max_cell_voltage": {
+        "name": "Module 4 highest cell voltage"
+      },
+      "battery_module_4_min_cell_voltage": {
+        "name": "Module 4 lowest cell voltage"
+      },
+      "battery_module_5_max_cell_voltage": {
+        "name": "Module 5 highest cell voltage"
+      },
+      "battery_module_5_min_cell_voltage": {
+        "name": "Module 5 lowest cell voltage"
+      },
+      "battery_module_6_max_cell_voltage": {
+        "name": "Module 6 highest cell voltage"
+      },
+      "battery_module_6_min_cell_voltage": {
+        "name": "Module 6 lowest cell voltage"
+      },
+      "battery_module_7_max_cell_voltage": {
+        "name": "Module 7 highest cell voltage"
+      },
+      "battery_module_7_min_cell_voltage": {
+        "name": "Module 7 lowest cell voltage"
+      },
+      "battery_module_8_max_cell_voltage": {
+        "name": "Module 8 highest cell voltage"
+      },
+      "battery_module_8_min_cell_voltage": {
+        "name": "Module 8 lowest cell voltage"
+      },
       "battery_pack_current": {
         "name": "Pack current"
       },
@@ -457,10 +514,10 @@
         "name": "Pack temperature"
       },
       "battery_pack_total_charge": {
-        "name": "Pack total charge"
+        "name": "Total pack charge energy"
       },
       "battery_pack_total_discharge": {
-        "name": "Pack total discharge"
+        "name": "Total pack discharge energy"
       },
       "battery_pack_voltage": {
         "name": "Pack voltage"
@@ -517,13 +574,13 @@
         "name": "Corrected load power"
       },
       "daily_battery_charge": {
-        "name": "Daily battery charge"
+        "name": "Daily battery charge energy"
       },
       "daily_battery_charge_from_pv": {
-        "name": "Daily battery charge from PV"
+        "name": "Daily battery charge energy from PV"
       },
       "daily_battery_discharge": {
-        "name": "Daily battery discharge"
+        "name": "Daily battery discharge energy"
       },
       "daily_consumed_energy": {
         "name": "Daily consumed energy"
@@ -559,7 +616,7 @@
         "name": "Direct consumption this year"
       },
       "ems_mode_selection_raw": {
-        "name": "EMS mode selection raw"
+        "name": "EMS mode selection code"
       },
       "export_from_pv_this_month": {
         "name": "Export from PV this month"
@@ -571,25 +628,22 @@
         "name": "Export power"
       },
       "export_power_limit": {
-        "name": "Export power limit"
+        "name": "Feed-in limit"
       },
       "export_power_limit_max": {
-        "name": "Export power limit max"
+        "name": "Feed-in limit maximum"
       },
       "export_power_limit_min": {
-        "name": "Export power limit min"
+        "name": "Feed-in limit minimum"
       },
       "export_power_limit_mode_raw": {
-        "name": "Export power limit mode raw"
+        "name": "Feed-in limit mode code"
       },
       "export_power_raw": {
-        "name": "Export power raw"
+        "name": "Export power signed"
       },
       "feed_in_limitation_ratio": {
-        "name": "Feed-in limitation ratio"
-      },
-      "forced_startup_under_low_soc_raw": {
-        "name": "Forced startup under low SoC raw"
+        "name": "Feed-in limit ratio"
       },
       "grid_frequency": {
         "name": "Grid frequency"
@@ -601,7 +655,7 @@
         "name": "Import power"
       },
       "inverter_alarm": {
-        "name": "Alarm"
+        "name": "Device alarm"
       },
       "inverter_firmware_version": {
         "name": "Firmware version"
@@ -610,13 +664,13 @@
         "name": "Rated output power"
       },
       "inverter_temperature": {
-        "name": "Temperature"
+        "name": "Device temperature"
       },
       "load_adjustment_mode_enable_raw": {
-        "name": "Load adjustment mode enable raw"
+        "name": "Load control mode enable code"
       },
       "load_adjustment_mode_selection_raw": {
-        "name": "Load adjustment mode selection raw"
+        "name": "Load control mode selection code"
       },
       "load_power": {
         "name": "Load power"
@@ -666,6 +720,9 @@
       "mppt1_current": {
         "name": "MPPT1 current"
       },
+      "mppt1_energy": {
+        "name": "MPPT1 energy"
+      },
       "mppt1_power": {
         "name": "MPPT1 power"
       },
@@ -674,6 +731,9 @@
       },
       "mppt2_current": {
         "name": "MPPT2 current"
+      },
+      "mppt2_energy": {
+        "name": "MPPT2 energy"
       },
       "mppt2_power": {
         "name": "MPPT2 power"
@@ -684,6 +744,9 @@
       "mppt3_current": {
         "name": "MPPT3 current"
       },
+      "mppt3_energy": {
+        "name": "MPPT3 energy"
+      },
       "mppt3_power": {
         "name": "MPPT3 power"
       },
@@ -692,6 +755,9 @@
       },
       "mppt4_current": {
         "name": "MPPT4 current"
+      },
+      "mppt4_energy": {
+        "name": "MPPT4 energy"
       },
       "mppt4_power": {
         "name": "MPPT4 power"
@@ -733,10 +799,10 @@
         "name": "Power factor"
       },
       "power_flow_status": {
-        "name": "Power flow status"
+        "name": "Power flow code"
       },
       "pv_generation_cut_raw": {
-        "name": "PV generation cut raw"
+        "name": "PV generation cut code"
       },
       "pv_generation_this_month": {
         "name": "PV generation this month"
@@ -745,13 +811,13 @@
         "name": "PV generation this year"
       },
       "pv_power_limitation_raw": {
-        "name": "PV power limitation raw"
+        "name": "PV power limitation code"
       },
       "reactive_power": {
         "name": "Reactive power"
       },
       "running_state_raw": {
-        "name": "Running state raw"
+        "name": "Running state code"
       },
       "self_consumption_of_today": {
         "name": "Self-consumption of today"
@@ -778,7 +844,7 @@
         "name": "Grid frequency"
       },
       "sg_inverter_temperature": {
-        "name": "Internal temperature"
+        "name": "Device temperature"
       },
       "sg_load_power": {
         "name": "Load power"
@@ -801,11 +867,23 @@
       "sg_mppt10_current": {
         "name": "MPPT10 current"
       },
+      "sg_mppt10_energy": {
+        "name": "MPPT10 energy"
+      },
+      "sg_mppt10_power": {
+        "name": "MPPT10 power"
+      },
       "sg_mppt10_voltage": {
         "name": "MPPT10 voltage"
       },
       "sg_mppt11_current": {
         "name": "MPPT11 current"
+      },
+      "sg_mppt11_energy": {
+        "name": "MPPT11 energy"
+      },
+      "sg_mppt11_power": {
+        "name": "MPPT11 power"
       },
       "sg_mppt11_voltage": {
         "name": "MPPT11 voltage"
@@ -813,11 +891,23 @@
       "sg_mppt12_current": {
         "name": "MPPT12 current"
       },
+      "sg_mppt12_energy": {
+        "name": "MPPT12 energy"
+      },
+      "sg_mppt12_power": {
+        "name": "MPPT12 power"
+      },
       "sg_mppt12_voltage": {
         "name": "MPPT12 voltage"
       },
       "sg_mppt1_current": {
         "name": "MPPT1 current"
+      },
+      "sg_mppt1_energy": {
+        "name": "MPPT1 energy"
+      },
+      "sg_mppt1_power": {
+        "name": "MPPT1 power"
       },
       "sg_mppt1_voltage": {
         "name": "MPPT1 voltage"
@@ -825,11 +915,23 @@
       "sg_mppt2_current": {
         "name": "MPPT2 current"
       },
+      "sg_mppt2_energy": {
+        "name": "MPPT2 energy"
+      },
+      "sg_mppt2_power": {
+        "name": "MPPT2 power"
+      },
       "sg_mppt2_voltage": {
         "name": "MPPT2 voltage"
       },
       "sg_mppt3_current": {
         "name": "MPPT3 current"
+      },
+      "sg_mppt3_energy": {
+        "name": "MPPT3 energy"
+      },
+      "sg_mppt3_power": {
+        "name": "MPPT3 power"
       },
       "sg_mppt3_voltage": {
         "name": "MPPT3 voltage"
@@ -837,11 +939,23 @@
       "sg_mppt4_current": {
         "name": "MPPT4 current"
       },
+      "sg_mppt4_energy": {
+        "name": "MPPT4 energy"
+      },
+      "sg_mppt4_power": {
+        "name": "MPPT4 power"
+      },
       "sg_mppt4_voltage": {
         "name": "MPPT4 voltage"
       },
       "sg_mppt5_current": {
         "name": "MPPT5 current"
+      },
+      "sg_mppt5_energy": {
+        "name": "MPPT5 energy"
+      },
+      "sg_mppt5_power": {
+        "name": "MPPT5 power"
       },
       "sg_mppt5_voltage": {
         "name": "MPPT5 voltage"
@@ -849,11 +963,23 @@
       "sg_mppt6_current": {
         "name": "MPPT6 current"
       },
+      "sg_mppt6_energy": {
+        "name": "MPPT6 energy"
+      },
+      "sg_mppt6_power": {
+        "name": "MPPT6 power"
+      },
       "sg_mppt6_voltage": {
         "name": "MPPT6 voltage"
       },
       "sg_mppt7_current": {
         "name": "MPPT7 current"
+      },
+      "sg_mppt7_energy": {
+        "name": "MPPT7 energy"
+      },
+      "sg_mppt7_power": {
+        "name": "MPPT7 power"
       },
       "sg_mppt7_voltage": {
         "name": "MPPT7 voltage"
@@ -861,11 +987,23 @@
       "sg_mppt8_current": {
         "name": "MPPT8 current"
       },
+      "sg_mppt8_energy": {
+        "name": "MPPT8 energy"
+      },
+      "sg_mppt8_power": {
+        "name": "MPPT8 power"
+      },
       "sg_mppt8_voltage": {
         "name": "MPPT8 voltage"
       },
       "sg_mppt9_current": {
         "name": "MPPT9 current"
+      },
+      "sg_mppt9_energy": {
+        "name": "MPPT9 energy"
+      },
+      "sg_mppt9_power": {
+        "name": "MPPT9 power"
       },
       "sg_mppt9_voltage": {
         "name": "MPPT9 voltage"
@@ -895,7 +1033,7 @@
         "name": "Power factor"
       },
       "sg_power_limitation": {
-        "name": "Power limitation"
+        "name": "Power limit active"
       },
       "sg_power_limitation_setting": {
         "name": "Power limit"
@@ -910,7 +1048,7 @@
         "name": "Total apparent power"
       },
       "sg_total_dc_power": {
-        "name": "Total DC power"
+        "name": "Total PV input power"
       },
       "sg_total_direct_energy_consumption": {
         "name": "Total direct energy consumption"
@@ -924,14 +1062,11 @@
       "sg_total_pv_generation": {
         "name": "Total PV generation"
       },
-      "sg_total_pv_generation_precise": {
-        "name": "Total PV generation (precise)"
-      },
       "sg_total_running_time": {
         "name": "Total running time"
       },
       "sg_work_state": {
-        "name": "Work state"
+        "name": "Running state"
       },
       "sungrow_arm_software": {
         "name": "ARM software version"
@@ -988,19 +1123,19 @@
         "name": "Total backup power"
       },
       "total_battery_charge": {
-        "name": "Total battery charge"
+        "name": "Total battery charge energy"
       },
       "total_battery_charge_from_pv": {
-        "name": "Total battery charge from PV"
+        "name": "Total battery charge energy from PV"
       },
       "total_battery_discharge": {
-        "name": "Total battery discharge"
+        "name": "Total battery discharge energy"
       },
       "total_consumed_energy": {
         "name": "Total consumed energy"
       },
       "total_dc_power": {
-        "name": "Total DC power"
+        "name": "Total PV input power"
       },
       "total_direct_energy_consumption": {
         "name": "Total direct energy consumption"
@@ -1024,7 +1159,7 @@
         "name": "Total site PV power"
       },
       "wallbox_available_current": {
-        "name": "Available current"
+        "name": "Offered charging current"
       },
       "wallbox_charging_power": {
         "name": "Charging power"
@@ -1039,7 +1174,7 @@
         "name": "Firmware version"
       },
       "wallbox_lifetime_energy": {
-        "name": "Lifetime energy"
+        "name": "Total charged energy"
       },
       "wallbox_maximum_charging_power": {
         "name": "Maximum charging power"
@@ -1048,22 +1183,22 @@
         "name": "Minimum charging power"
       },
       "wallbox_output_current_setting": {
-        "name": "Configured output current"
+        "name": "Charging current setpoint"
       },
       "wallbox_phase_a_current": {
-        "name": "Phase A current"
+        "name": "Phase A charging current"
       },
       "wallbox_phase_a_voltage": {
         "name": "Phase A voltage"
       },
       "wallbox_phase_b_current": {
-        "name": "Phase B current"
+        "name": "Phase B charging current"
       },
       "wallbox_phase_b_voltage": {
         "name": "Phase B voltage"
       },
       "wallbox_phase_c_current": {
-        "name": "Phase C current"
+        "name": "Phase C charging current"
       },
       "wallbox_phase_c_voltage": {
         "name": "Phase C voltage"
@@ -1072,7 +1207,7 @@
         "name": "Phase mode"
       },
       "wallbox_rated_current": {
-        "name": "Rated current"
+        "name": "Maximum charging current"
       },
       "wallbox_session_energy": {
         "name": "Session energy"
@@ -1101,13 +1236,13 @@
         "name": "Cut PV generation"
       },
       "export_power_limit_mode": {
-        "name": "Export power limit mode"
+        "name": "Feed-in limit mode"
       },
       "forced_charging_schedule": {
         "name": "Forced charging schedule"
       },
       "load_adjustment_mode_enable": {
-        "name": "Load adjustment"
+        "name": "Load control"
       }
     },
     "time": {
@@ -1170,7 +1305,7 @@
     "entity_id_style": {
       "options": {
         "migrate": "The YAML package's IDs, such as sensor.total_dc_power",
-        "new": "Device-scoped IDs, such as sensor.sh10rt_total_dc_power"
+        "new": "Device-scoped IDs, such as sensor.sh10rt_total_pv_input_power"
       }
     }
   },
@@ -1324,7 +1459,7 @@
       },
       "promote": {
         "title": "Set up the devices",
-        "description": "Home Assistant found **{count} entities** from the `modbus_sungrow.yaml` package, such as `{example}`. Your recorder history, your statistics and every dashboard card are stored against those entity IDs.\n\n{status}\n\n**Migrate my existing entities** takes those IDs over. History and statistics carry on uninterrupted and your dashboards keep working unchanged. Nothing is copied and nothing is deleted.\n\n**Start fresh** gives this inverter its own IDs, such as `sensor.sh10rt_total_dc_power`. Your old history stays where it is, under the old IDs, and your dashboards keep pointing at it.\n\nEither way the entities are identical in every other respect.",
+        "description": "Home Assistant found **{count} entities** from the `modbus_sungrow.yaml` package, such as `{example}`. Your recorder history, your statistics and every dashboard card are stored against those entity IDs.\n\n{status}\n\n**Migrate my existing entities** takes those IDs over. History and statistics carry on uninterrupted and your dashboards keep working unchanged. Nothing is copied and nothing is deleted.\n\n**Start fresh** gives this inverter its own IDs, such as `sensor.sh10rt_total_pv_input_power`. Your old history stays where it is, under the old IDs, and your dashboards keep pointing at it.\n\nEither way the entities are identical in every other respect.",
         "data": {
           "entity_ids": "Entity IDs"
         },
@@ -1334,7 +1469,7 @@
       },
       "slot_unknown": {
         "title": "Set up the devices",
-        "description": "This house ran the YAML package for more than one inverter, and Home Assistant cannot tell which of them this one was. The package's serial sensors are what say so, and neither the running package nor the recorded history has this inverter's serial.\n\nSo the YAML package's entity IDs are not offered: taking the wrong set would give this inverter another inverter's history. **Submit** sets it up with its own IDs, such as `sensor.sh10rt_total_dc_power`.\n\nTo keep its old IDs, put the YAML package back for one restart, so this inverter's serial is recorded, then remove it and restart again. **Configure** can then switch this inverter to its old IDs; the serial stays on record for the recorder's retention, ten days unless you changed it."
+        "description": "This house ran the YAML package for more than one inverter, and Home Assistant cannot tell which of them this one was. The package's serial sensors are what say so, and neither the running package nor the recorded history has this inverter's serial.\n\nSo the YAML package's entity IDs are not offered: taking the wrong set would give this inverter another inverter's history. **Submit** sets it up with its own IDs, such as `sensor.sh10rt_total_pv_input_power`.\n\nTo keep its old IDs, put the YAML package back for one restart, so this inverter's serial is recorded, then remove it and restart again. **Configure** can then switch this inverter to its old IDs; the serial stays on record for the recorder's retention, ten days unless you changed it."
       },
       "other_inverter": {
         "title": "What is the other inverter?",
@@ -1349,7 +1484,7 @@
       },
       "entity_ids_modern": {
         "title": "Move to device-scoped entity IDs",
-        "description": "The entities take IDs named after this device, such as `sensor.sh10rt_total_dc_power`. Their history and statistics move with them.\n\n{changes}{status}\n\nNothing is copied and nothing is deleted. Names, areas and other settings you gave the entities stay with them. Dashboards, automations and scripts that use the old IDs are not rewritten, so check them afterwards.\n\nYou can move back here at any time."
+        "description": "The entities take IDs named after this device, such as `sensor.sh10rt_total_pv_input_power`. Their history and statistics move with them.\n\n{changes}{status}\n\nNothing is copied and nothing is deleted. Names, areas and other settings you gave the entities stay with them. Dashboards, automations and scripts that use the old IDs are not rewritten, so check them afterwards.\n\nYou can move back here at any time."
       }
     },
     "error": {

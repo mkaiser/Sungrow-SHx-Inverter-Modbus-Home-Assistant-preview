@@ -56,6 +56,7 @@ SENSOR_DESCRIPTIONS: tuple[SungrowSensorDescription, ...] = (
         legacy_unique_id="sg_apl_shutdown_on_zero_raw",
         legacy_platform="modbus",
         entity_category=EntityCategory.DIAGNOSTIC,
+        legacy_only=True,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     SungrowSensorDescription(
@@ -675,13 +676,6 @@ SENSOR_DESCRIPTIONS: tuple[SungrowSensorDescription, ...] = (
         suggested_display_precision=1,
     ),
     SungrowSensorDescription(
-        key="forced_startup_under_low_soc_raw",
-        component="fast_holding",
-        field="forced_startup_under_low_soc_raw",
-        translation_key="forced_startup_under_low_soc_raw",
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    SungrowSensorDescription(
         key="grid_frequency",
         component="fast_input",
         field="grid_frequency",
@@ -1154,6 +1148,10 @@ SENSOR_DESCRIPTIONS: tuple[SungrowSensorDescription, ...] = (
         legacy_unique_id="uid_power_flow_status",
         legacy_platform="modbus",
         entity_category=EntityCategory.DIAGNOSTIC,
+        # The raw bits behind the power flow binary sensors: for diagnosing
+        # them, not for a dashboard. A migrating user's entity is registered
+        # before the platform runs, so it stays enabled.
+        entity_registry_enabled_default=False,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
     ),
