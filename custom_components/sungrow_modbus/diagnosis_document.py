@@ -1,21 +1,21 @@
-"""A capability survey, from a running integration rather than a terminal.
+"""A capability diagnosis, from a running integration rather than a terminal.
 
-The evidence this project reasons from lives in `device-survey/`, and
+The evidence this project reasons from lives in `device-diagnosis/`, and
 it comes from a handful of houses. Not because nobody else would help: a
-terminal survey needs a machine that can reach the inverter and a command
+terminal diagnosis needs a machine that can reach the inverter and a command
 line, and most people who have a Sungrow have neither to hand.
 
 Somebody who has set this integration up has the hard part already — a working,
 identified connection to their inverter. This turns it into a document, in
-exactly the format `device-survey/scripts/python/sungrow_survey.py` writes,
+exactly the format `device-diagnosis/scripts/python/sungrow_diagnosis.py` writes,
 so one generator keeps building `doc/compatibility.md` from both and a reading
 from somebody who only ever clicked a button counts the same as one from a
 terminal.
 
-Two callers build it. The **Run read only diagnosis** button (`survey.py`)
+Two callers build it. The **Run read-only diagnosis** button (`diagnosis.py`)
 builds the full document in the background and offers it as a signed
 download. The **diagnostics download** builds a cheaper one in its
-`survey` section: Home Assistant already has a button that produces a
+`diagnosis` section: Home Assistant already has a button that produces a
 JSON file a user attaches to an issue, it works on an entry with no entities,
 and nothing here has to write to disk or ask for a path.
 
@@ -43,7 +43,7 @@ reader to discover:
   apart.
 
 The tables, the schema, the stand-in and the transport vocabulary all come
-from `sungrow_modbus.survey_document`, so this and the standalone survey cannot
+from `sungrow_modbus.diagnosis_document`, so this and the standalone diagnosis cannot
 drift apart on what a probe is called or what a serial becomes.
 """
 
@@ -59,38 +59,38 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 from sungrow_modbus import (
     block_test,
+    diagnosis as diagnosis_api,
+    diagnosis_document as diagnosis,
     dump as register_dump,
     string_inverter,
-    survey as survey_api,
-    survey_document as survey,
     wallbox as wallbox_reader,
 )
 from sungrow_modbus.battery.device import PUBLISHED_NAMES as BATTERY_NAMES
-from sungrow_modbus.survey import summarise as _summarise
+from sungrow_modbus.diagnosis import summarise as _summarise
 
 from .const import (
+    CONF_DIAGNOSIS_BATTERY,
+    CONF_DIAGNOSIS_COMMENT,
+    CONF_DIAGNOSIS_DUMP,
+    CONF_DIAGNOSIS_OTHER_INVERTER,
+    CONF_DIAGNOSIS_OTHER_INVERTER_DETAIL,
+    CONF_DIAGNOSIS_POLLERS,
+    CONF_DIAGNOSIS_PROXY,
+    CONF_DIAGNOSIS_TRANSPORT,
     CONF_EXPORT_WRITE_SCALE_FIRMWARE,
     CONF_EXPORT_WRITE_SCALE_PROBE,
     CONF_PUBLISH_ADDRESS,
     CONF_REPORTER,
-    CONF_SURVEY_BATTERY,
-    CONF_SURVEY_COMMENT,
-    CONF_SURVEY_DUMP,
-    CONF_SURVEY_OTHER_INVERTER,
-    CONF_SURVEY_OTHER_INVERTER_DETAIL,
-    CONF_SURVEY_POLLERS,
-    CONF_SURVEY_PROXY,
-    CONF_SURVEY_TRANSPORT,
     CONF_WALLBOX_HOST,
-    DEFAULT_SURVEY_DUMP,
+    DEFAULT_DIAGNOSIS_DUMP,
 )
 from .coordinator import SungrowConfigEntry
-from .survey import Progress
+from .diagnosis import Progress
 
 _LOGGER = logging.getLogger(__name__)
 
 Step = Callable[[str], None]
-"""What each read of a survey reports: the label the step sensor shows."""
+"""What each read of a diagnosis reports: the label the step sensor shows."""
 
 
 def summarise(document: dict[str, Any]) -> str:
@@ -105,7 +105,7 @@ def planned_steps(
     wallbox: bool = False,
     wallbox_direct: bool = False,
 ) -> int:
-    """Count the reads a survey will report progress for, before it starts.
+    """Count the reads a diagnosis will report progress for, before it starts.
 
     Every probe, and one step for assembling what the
     coordinators already hold -- assembly is a single step because it does no
@@ -117,10 +117,10 @@ def planned_steps(
     The dump's share is counted here rather than discovered as it goes, because
     a bar whose total grows halfway through is worse than no bar: with the dump
     on it is most of the bar, so getting it wrong would not be a rounding
-    error. A caller sharing one bar between this and the control test needs the
-    number without starting a survey, which is why it is a function.
+    error. A caller sharing one bar between this and the capability test needs the
+    number without starting a diagnosis, which is why it is a function.
     """
-    total = len(survey.PROBES) + 1 + block_reads
+    total = len(diagnosis.PROBES) + 1 + block_reads
     if dumping:
         total += register_dump.block_count()
         if wallbox:
@@ -159,15 +159,15 @@ def _testimony(options: Mapping[str, Any]) -> dict[str, str]:
     """
     return {
         "reporter": options.get(CONF_REPORTER) or "anonymous",
-        "comment": options.get(CONF_SURVEY_COMMENT, ""),
-        "battery": options.get(CONF_SURVEY_BATTERY, ""),
-        "transport": options.get(CONF_SURVEY_TRANSPORT, ""),
-        "modbus_proxy": options.get(CONF_SURVEY_PROXY, ""),
+        "comment": options.get(CONF_DIAGNOSIS_COMMENT, ""),
+        "battery": options.get(CONF_DIAGNOSIS_BATTERY, ""),
+        "transport": options.get(CONF_DIAGNOSIS_TRANSPORT, ""),
+        "modbus_proxy": options.get(CONF_DIAGNOSIS_PROXY, ""),
         # What the owner says about anything *else* polling. What this Home
         # Assistant does is not testimony and is measured separately.
-        "other_pollers": options.get(CONF_SURVEY_POLLERS, ""),
-        "other_inverter": options.get(CONF_SURVEY_OTHER_INVERTER, ""),
-        "other_inverter_detail": options.get(CONF_SURVEY_OTHER_INVERTER_DETAIL, ""),
+        "other_pollers": options.get(CONF_DIAGNOSIS_POLLERS, ""),
+        "other_inverter": options.get(CONF_DIAGNOSIS_OTHER_INVERTER, ""),
+        "other_inverter_detail": options.get(CONF_DIAGNOSIS_OTHER_INVERTER_DETAIL, ""),
     }
 
 
@@ -180,35 +180,35 @@ async def async_build(
     allow_dump: bool = False,
     allow_block_test: bool = False,
 ) -> dict[str, Any]:
-    """Return one publishable survey document for this entry.
+    """Return one publishable diagnosis document for this entry.
 
     `options` overrides the entry's own, for building a document from
     testimony that is not saved yet. Both callers use the entry's saved
     options; tests pass it, since changing an entry's options reloads it.
 
     `on_progress(fraction, step)` is called after each read that can be
-    counted, so a device page can show how far along a survey is and what it
-    is reading. Counted rather than timed: the same survey is under a second
+    counted, so a device page can show how far along a diagnosis is and what it
+    is reading. Counted rather than timed: the same diagnosis is under a second
     on a cable and a quarter of an hour over a VPN, and only the number of
     reads is known in advance. Optional, because diagnostics downloads build
     the same document with nobody watching.
 
-    `allow_dump` is what makes the owner's `survey_register_dump` option
+    `allow_dump` is what makes the owner's `diagnosis_register_dump` option
     count, and it is a separate argument rather than being read straight from
     the options for one reason: **the caller decides whether it can afford
-    five minutes.** The survey button can -- it is a background task with a
+    five minutes.** The diagnosis button can -- it is a background task with a
     progress bar and a notification at the end. The diagnostics download
     cannot: it is a button somebody waits on, so it leaves this False and the
     option has no effect there, however the owner set it.
 
     `allow_block_test` is the same decision for the block read test, which is
-    not an option at all: the survey button always runs it and the download
+    not an option at all: the diagnosis button always runs it and the download
     never does. It runs **first**, before the probes, because it is the
     measurement that only means anything on an idle link -- the probes and the
     dump are themselves reads.
 
-    Nothing here writes, and part B's result is not an argument: the survey
-    runner attaches it after part A with `attach_control_test`. So the
+    Nothing here writes, and part B's result is not an argument: the diagnosis
+    runner attaches it after part A with `attach_capability_test`. So the
     diagnostics download, which builds this same document from this same
     code, cannot acquire the power to write by inheriting a default.
     """
@@ -220,7 +220,9 @@ async def async_build(
     device = next(iter(runtime.coordinators.values())).device
 
     # Asked for and affordable are two different things; see the docstring.
-    dumping = allow_dump and bool(options.get(CONF_SURVEY_DUMP, DEFAULT_SURVEY_DUMP))
+    dumping = allow_dump and bool(
+        options.get(CONF_DIAGNOSIS_DUMP, DEFAULT_DIAGNOSIS_DUMP)
+    )
 
     # The denominator, so a fraction means something; `planned_steps` says
     # what it counts and why it is counted up front.
@@ -246,17 +248,17 @@ async def async_build(
         if blocks
         else None
     )
-    collected = await survey_api.async_capability_survey(
+    collected = await diagnosis_api.async_capability_diagnosis(
         _EntrySource(runtime, device, dumping, step), on_failure=_lost
     )
     step("assembling the document")
 
-    # Same keys and shapes as `sungrow_survey.py` writes, through the same
+    # Same keys and shapes as `sungrow_diagnosis.py` writes, through the same
     # builder, so `doc/compatibility.md` and anybody reading a document need
     # not know which producer made it. The builder masks the dump and checks
     # part B's block for the serial; a caller cannot hand it either unshaped.
-    document = survey.assemble_document(
-        command_line=f"{survey.COLLECTED_BY_INTEGRATION} diagnostics",
+    document = diagnosis.assemble_document(
+        command_line=f"{diagnosis.COLLECTED_BY_INTEGRATION} diagnostics",
         read_at=dt_util.utcnow().isoformat(timespec="seconds").replace("+00:00", "Z"),
         user_inputs=_testimony(options),
         host=entry.data.get(CONF_HOST, ""),
@@ -292,7 +294,7 @@ async def _async_build_string_inverter(
 
     The dump always runs, download included: it is the evidence for a map
     nothing has measured, and `dump.SG_BANDS` is a dozen reads. No probes, no
-    block test, no control test: each asks the hybrid's map. The serial is
+    block test, no capability test: each asks the hybrid's map. The serial is
     read from the dump and masked out of it before anything else sees it.
     """
     device = entry.runtime_data.inverter_coordinator.device
@@ -314,10 +316,10 @@ async def _async_build_string_inverter(
     dump = string_inverter.mask(raw)
     del raw
     return string_inverter.document(
-        command_line=f"{survey.COLLECTED_BY_INTEGRATION} diagnostics",
+        command_line=f"{diagnosis.COLLECTED_BY_INTEGRATION} diagnostics",
         read_at=dt_util.utcnow().isoformat(timespec="seconds").replace("+00:00", "Z"),
         user_inputs=_testimony(options),
-        address_tail=survey.address_tail(
+        address_tail=diagnosis.address_tail(
             entry.data.get(CONF_HOST, ""),
             bool(options.get(CONF_PUBLISH_ADDRESS, False)),
         ),
@@ -340,7 +342,7 @@ def attach_export_scale(document: dict[str, Any], entry: Any, device: Any) -> No
     on other firmware than the one this document names is left out, because
     a firmware update is what changes the answer (#763) -- the block would
     otherwise describe a firmware the document does not. Absent, it says "not
-    asked", as it does in a terminal survey run without `--export-scale`.
+    asked", as it does in a terminal diagnosis run without `--export-scale`.
     """
     block = entry.data.get(CONF_EXPORT_WRITE_SCALE_PROBE)
     if not block:
@@ -358,9 +360,9 @@ def attach_export_scale(document: dict[str, Any], entry: Any, device: Any) -> No
 
 
 class _EntrySource:
-    """How a running entry collects each step of a survey.
+    """How a running entry collects each step of a diagnosis.
 
-    The order is the library's (`async_capability_survey`). The identity, the
+    The order is the library's (`async_capability_diagnosis`). The identity, the
     firmware and the decoded readings come from what the coordinators already
     polled: reading them again would spend requests on an inverter that grants
     very few sessions, and could disagree with the entities on the same page.
@@ -373,7 +375,7 @@ class _EntrySource:
         self.step = step
 
     async def identity(self) -> tuple[str | None, dict[str, str | None]]:
-        return self.device.serial_number, survey.firmware_section(self.device)
+        return self.device.serial_number, diagnosis.firmware_section(self.device)
 
     async def readings(self) -> dict[str, Any]:
         return _readings(self.runtime, self.device)
@@ -383,10 +385,10 @@ class _EntrySource:
 
     async def connection(self, collected: Any) -> dict[str, Any]:
         answered_6100 = collected.probe_states.get(
-            survey.DIRECT_ONLY_LABEL, survey.State.NO_ANSWER
+            diagnosis.DIRECT_ONLY_LABEL, diagnosis.State.NO_ANSWER
         )
         module = collected.firmware.get("communication_module")
-        return survey.connection_block(str(answered_6100), module)
+        return diagnosis.connection_block(str(answered_6100), module)
 
     async def register_dump(self) -> dict[str, Any] | None:
         return await _async_dump(self.device, self.step) if self.dumping else None
@@ -398,25 +400,25 @@ class _EntrySource:
         return await _async_wallbox(self.runtime, self.dumping, self.step)
 
 
-def _lost(step: survey_api.Step, error: BaseException) -> None:
+def _lost(step: diagnosis_api.Step, error: BaseException) -> None:
     """Log a step the link lost; the document is published without it."""
     _LOGGER.warning(
-        "Survey step %s lost to %s; the document is written without it",
+        "Diagnosis step %s lost to %s; the document is written without it",
         step,
         type(error).__name__,
     )
 
 
-def attach_control_test(
+def attach_capability_test(
     document: dict[str, Any], block: dict[str, Any], device: Any
 ) -> None:
     """Put part B's result into a document part A already built.
 
-    The survey runs part B *after* part A, so the block does not exist yet
+    The diagnosis runs part B *after* part A, so the block does not exist yet
     when `async_build` is called. The package's door checks it for the
     serial on the way in, exactly as `assemble_document` does.
     """
-    survey.attach_control_test(document, block, serial=device.serial_number or "")
+    diagnosis.attach_capability_test(document, block, serial=device.serial_number or "")
 
 
 async def _async_dump(device: Any, step: Step) -> dict[str, Any]:
@@ -439,11 +441,11 @@ async def _async_probe_words(
 ) -> tuple[dict[str, list[int]], dict[str, str]]:
     """Read every curated probe once: raw words and states.
 
-    One attempt each, unlike the terminal survey's three: this connection is
+    One attempt each, unlike the terminal diagnosis's three: this connection is
     shared with the coordinators, and a probe that retries holds every one of
     them off for as long as it waits.
     """
-    return await survey_api.async_probe_words(
+    return await diagnosis_api.async_probe_words(
         device.async_read_words, attempts=lambda _label: 1, on_probe=step
     )
 
@@ -451,10 +453,10 @@ async def _async_probe_words(
 def _contention(runtime: Any, *, block_test_run: bool = False) -> dict[str, Any]:
     """State what this Home Assistant was doing while the document was made.
 
-    The standalone survey asks an owner whether anything else was polling.
+    The standalone diagnosis asks an owner whether anything else was polling.
     Here the answer is known: this entry's coordinators poll the same
     connection, and `coordinators_paused` says whether the run held them off
-    -- the survey button does, the diagnostics download does not. Saying
+    -- the diagnosis button does, the diagnostics download does not. Saying
     which components and how often lets a reader judge a dropped block when
     they were not held off: a component on a five-second tier is a very
     different neighbour to one on ten minutes.
@@ -474,7 +476,7 @@ def _contention(runtime: Any, *, block_test_run: bool = False) -> dict[str, Any]
                 if (interval := runtime.interval_of(component)) is not None
             }
         ),
-        # Read at the time of the run, not assumed: the survey button holds
+        # Read at the time of the run, not assumed: the diagnosis button holds
         # the tiers off, a diagnostics download does not.
         "coordinators_paused": paused,
         "block_read_test": (
@@ -482,15 +484,15 @@ def _contention(runtime: Any, *, block_test_run: bool = False) -> dict[str, Any]
             "block_read_test"
             if block_test_run
             else "not run: it reads every block of the poll three times plus "
-            "narrowing, which the survey button affords and a diagnostics "
+            "narrowing, which the diagnosis button affords and a diagnostics "
             "download does not"
         ),
     }
 
 
 def _readings(runtime: Any, device: Any) -> dict[str, Any]:
-    """Every decoded value, and what did not read, in the survey's shape."""
-    return survey.readings_section(
+    """Every decoded value, and what did not read, in the diagnosis's shape."""
+    return diagnosis.readings_section(
         device,
         (
             component
@@ -503,20 +505,20 @@ def _readings(runtime: Any, device: Any) -> dict[str, Any]:
 async def _async_battery_pack(runtime: Any) -> dict[str, Any] | None:
     """Return the pack's own registers, when one answered on this endpoint.
 
-    The poll leaves the per-module block unread, so the survey reads it here,
+    The poll leaves the per-module block unread, so the diagnosis reads it here,
     once, and with the poll's own components reports what failed -- the
-    terminal survey's section, whichever producer wrote it.
+    terminal diagnosis's section, whichever producer wrote it.
     """
     coordinator = runtime.battery
     if coordinator is None:
         return None
     device = coordinator.device
-    report = await device.async_update(survey=True)
+    report = await device.async_update(diagnosis=True)
     failed = [
         f"{BATTERY_NAMES[attribute]} ({type(error).__name__})"
         for attribute, error in report.failed.items()
     ]
-    return survey.battery_pack_section(
+    return diagnosis.battery_pack_section(
         device,
         device.unit_id,
         failed,
@@ -529,14 +531,14 @@ async def _async_wallbox(
 ) -> dict[str, Any] | None:
     """Return the wallbox's section, when one answered behind this endpoint.
 
-    The survey's shape, from the library's decoder, so a document from the
-    device page and one from `sungrow_survey.py` read the same: `unit` and
+    The diagnosis's shape, from the library's decoder, so a document from the
+    device page and one from `sungrow_diagnosis.py` read the same: `unit` and
     per-field `readings`, plus the masked `register_dump` of its 206 addresses
     when the owner's dump option is on. Without it, one read per component
     -- the spans the poll already covers, which no serial is in.
 
-    Masking and the stand-in are the package's, in `survey_document.wallbox_section`
-    and `wallbox_from_dump`, so they cannot drift from the terminal survey's.
+    Masking and the stand-in are the package's, in `diagnosis_document.wallbox_section`
+    and `wallbox_from_dump`, so they cannot drift from the terminal diagnosis's.
     """
     coordinator = runtime.wallbox
     if coordinator is None:
@@ -550,7 +552,7 @@ async def _async_wallbox(
         )
         if not found:
             return None
-        return survey.wallbox_section(
+        return diagnosis.wallbox_section(
             device.unit_id,
             readings=found,
             serial_stand_in=await wallbox_reader.async_serial_stand_in(
@@ -567,4 +569,4 @@ async def _async_wallbox(
         on_progress=on_block,
         bands=wallbox_bands(direct),
     )
-    return survey.wallbox_from_dump(device.unit_id, raw, path=path)
+    return diagnosis.wallbox_from_dump(device.unit_id, raw, path=path)

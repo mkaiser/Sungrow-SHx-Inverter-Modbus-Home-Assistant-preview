@@ -1,4 +1,4 @@
-"""Running a capability survey from the device page, and saying where it is.
+"""Running a capability diagnosis from the device page, and saying where it is.
 
 Not in a config flow, because a flow is wrong in three ways a contributor
 feels: a modal dialog cannot be left while it works, an indeterminate spinner
@@ -15,21 +15,21 @@ Three things this buys that a flow could not:
   else, come back. The run is a task on the event loop, not a dialog.
 - **The step is a state**, so the recorder keeps it. The history of the
   "current step" sensor *is* the log of what was probed and in what order --
-  which is the thing a maintainer asks for when a survey stalls on one
+  which is the thing a maintainer asks for when a diagnosis stalls on one
   house's link and nowhere else.
 - **A document can be downloaded**, because a signed URL can be put in a
   notification. See `download.py`.
 
-**A run has two parts.** Part A is the capability survey and reads only. Part
-B is the control test, which **writes** to each control and puts it back, and
-runs only when a caller asks for it by name -- the control test button and its
+**A run has two parts.** Part A is the capability diagnosis and reads only. Part
+B is the capability test, which **writes** to each control and puts it back, and
+runs only when a caller asks for it by name -- the capability test button and its
 action, and nothing else. One runner owns both because they share one
 serialized connection, and a Sungrow grants very few sessions: two runs at once
 would interleave, and with writes in the picture that means restoring each
 other's probe values.
 
-Nothing here talks Modbus. `survey_document.async_build` does the reading,
-`control_test.ControlTestRunner` does the writing, and both call back with a
+Nothing here talks Modbus. `diagnosis_document.async_build` does the reading,
+`capability_test.CapabilityTestRunner` does the writing, and both call back with a
 fraction and a label; this turns those into state and splits one progress bar
 between them.
 """
@@ -49,24 +49,24 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 from sungrow_modbus import block_test, string_inverter
-from sungrow_modbus.control_test import (
+from sungrow_modbus.capability_test import (
     Options as ControlOptions,
-    planned_steps as control_test_steps,
+    planned_steps as capability_test_steps,
 )
 
 from .const import (
-    CONF_CONTROL_TEST_CHARGE_WINDOW,
-    CONF_CONTROL_TEST_DISCHARGE_WINDOW,
-    CONF_CONTROL_TEST_EXPORT,
-    CONF_CONTROL_TEST_IMPORT_LIMIT,
-    CONF_CONTROL_TEST_PV_CUT,
-    CONF_CONTROL_TEST_RESTART,
-    CONF_SURVEY_DUMP,
-    CONTROL_TEST_PERMISSION_DEFAULT,
-    DEFAULT_SURVEY_DUMP,
+    CAPABILITY_TEST_PERMISSION_DEFAULT,
+    CONF_CAPABILITY_TEST_CHARGE_WINDOW,
+    CONF_CAPABILITY_TEST_DISCHARGE_WINDOW,
+    CONF_CAPABILITY_TEST_EXPORT,
+    CONF_CAPABILITY_TEST_IMPORT_LIMIT,
+    CONF_CAPABILITY_TEST_PV_CUT,
+    CONF_CAPABILITY_TEST_RESTART,
+    CONF_DIAGNOSIS_DUMP,
+    DEFAULT_DIAGNOSIS_DUMP,
+    DIAGNOSIS_ISSUE_URL,
     DOMAIN,
     LINK_VALID,
-    SURVEY_ISSUE_URL,
 )
 
 if TYPE_CHECKING:
@@ -76,19 +76,19 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Dispatcher signal, per entry, fired whenever the state below changes.
 #: Entities subscribe to it rather than polling the runner.
-SIGNAL_SURVEY = "sungrow_modbus_survey_{}"
+SIGNAL_DIAGNOSIS = "sungrow_modbus_diagnosis_{}"
 
 #: The two halves of a full run. Part A asks what is here and answers it
 #: entirely by reading; part B asks whether writing to it works, which cannot
 #: be answered without writing. One runner owns both because they share one
 #: serialized connection, and a Sungrow grants very few sessions.
-PART_A = "survey"
-PART_B = "control test"
+PART_A = "diagnosis"
+PART_B = "capability test"
 
 
 @dataclass(frozen=True)
-class SurveyState:
-    """What the survey is doing, or last did.
+class DiagnosisState:
+    """What the diagnosis is doing, or last did.
 
     Frozen, and replaced rather than mutated, so an entity reading it while a
     probe updates it can never see half of one state -- the callback runs on
@@ -102,7 +102,7 @@ class SurveyState:
     fraction: float | None = None
     """Progress from 0.0 to 1.0, or None when nothing has run yet.
 
-    Derived from a count of reads, not from time: a survey over a VPN takes
+    Derived from a count of reads, not from time: a diagnosis over a VPN takes
     twenty times as long as one over a cable, and the count is the only part
     of that which is knowable in advance.
     """
@@ -129,7 +129,7 @@ class SurveyState:
     them without reading the label carefully.
     """
 
-    control_test: dict[str, Any] | None = field(default=None, repr=False)
+    capability_test: dict[str, Any] | None = field(default=None, repr=False)
     """Part B's result, or None when the last run only read."""
 
     document: dict[str, Any] | None = field(default=None, repr=False)
@@ -148,21 +148,23 @@ class SurveyState:
         return round(self.fraction * 100)
 
 
-class SurveyRunner:
-    """Owns one entry's survey: starts it, tracks it, announces it."""
+class DiagnosisRunner:
+    """Owns one entry's diagnosis: starts it, tracks it, announces it."""
 
     def __init__(self, hass: HomeAssistant, entry: SungrowConfigEntry) -> None:
         """Prepare a runner. Nothing runs until `async_start`."""
         self.hass = hass
         self.entry = entry
-        self.state = SurveyState()
+        self.state = DiagnosisState()
         self._task: asyncio.Task[None] | None = None
+        #: Whether this run's part B is the forced startup check alone.
+        self._forced_startup = False
         self._lapsed: CALLBACK_TYPE | None = None
 
     @property
     def signal(self) -> str:
         """The dispatcher signal this runner's entities listen on."""
-        return SIGNAL_SURVEY.format(self.entry.entry_id)
+        return SIGNAL_DIAGNOSIS.format(self.entry.entry_id)
 
     @callback
     def _set(self, **changes: Any) -> None:
@@ -171,13 +173,15 @@ class SurveyRunner:
         async_dispatcher_send(self.hass, self.signal)
 
     @callback
-    def async_start(self, *, control_test: bool = False) -> bool:
+    def async_start(
+        self, *, capability_test: bool = False, forced_startup: bool = False
+    ) -> bool:
         """Begin a run. Returns False when one is already running.
 
-        `control_test` adds part B, which **writes** to every control the
+        `capability_test` adds part B, which **writes** to every control the
         integration can write to and puts each one back. It is off unless a
-        caller asks for it, and the only caller that asks is the control test
-        button and its matching action -- so the survey button, the options
+        caller asks for it, and the only caller that asks is the capability test
+        button and its matching action -- so the diagnosis button, the options
         flow and the diagnostics download cannot acquire the power to write by
         inheriting a default.
 
@@ -185,15 +189,18 @@ class SurveyRunner:
         serialized connection, and a Sungrow grants few sessions. With part B
         in the picture that stops being a politeness -- interleaved *writes*
         are how two runs would restore each other's probe values.
+
+        `forced_startup` makes part B the forced startup check alone, which
+        runs only on an inverter in low-SoC standby.
         """
         if self._task is not None and not self._task.done():
-            _LOGGER.debug("Survey already running for %s", self.entry.title)
+            _LOGGER.debug("Diagnosis already running for %s", self.entry.title)
             return False
-        if control_test and self.entry.runtime_data.is_string_inverter:
+        if capability_test and self.entry.runtime_data.is_string_inverter:
             # Nothing here writes to an SG: its holding registers are not the
             # hybrid's, and no write to one has been watched.
             _LOGGER.warning(
-                "%s is a string inverter; the control test writes only to a "
+                "%s is a string inverter; the capability test writes only to a "
                 "hybrid, so it was not started",
                 self.entry.title,
             )
@@ -204,6 +211,7 @@ class SurveyRunner:
         # notification -- same `notification_id` -- with the words "the link
         # has expired", on a link that is minutes old.
         self._async_cancel_lapse()
+        self._forced_startup = capability_test and forced_startup
 
         self._set(
             running=True,
@@ -214,17 +222,17 @@ class SurveyRunner:
             error=None,
             fields_read=None,
             part=PART_A,
-            control_test=None,
+            capability_test=None,
         )
         self._task = self.entry.async_create_background_task(
             self.hass,
-            self._async_run(control_test),
-            name=f"sungrow survey {self.entry.entry_id}",
+            self._async_run(capability_test),
+            name=f"sungrow diagnosis {self.entry.entry_id}",
         )
         return True
 
     def _shares(
-        self, options: dict[str, Any], control_test: bool, block_reads: int
+        self, options: dict[str, Any], capability_test: bool, block_reads: int
     ) -> tuple[float, int]:
         """Split one progress bar between the two parts, before either starts.
 
@@ -236,36 +244,41 @@ class SurveyRunner:
         A's. The alternative -- a bar that resets, or a second bar -- is worse
         for the person watching, and the step label names the part throughout.
         """
-        from .survey_document import planned_steps as survey_steps, wallbox_is_direct
+        from .diagnosis_document import (
+            planned_steps as diagnosis_steps,
+            wallbox_is_direct,
+        )
 
-        dumping = bool(options.get(CONF_SURVEY_DUMP, DEFAULT_SURVEY_DUMP))
-        a_steps = survey_steps(
+        dumping = bool(options.get(CONF_DIAGNOSIS_DUMP, DEFAULT_DIAGNOSIS_DUMP))
+        a_steps = diagnosis_steps(
             dumping,
             block_reads,
             wallbox=self.entry.runtime_data.wallbox is not None,
             wallbox_direct=self.entry.runtime_data.wallbox is not None
             and wallbox_is_direct(self.entry.runtime_data.wallbox),
         )
-        if not control_test:
+        if not capability_test:
             return 1.0, a_steps
-        b_steps = control_test_steps(self._control_options())
+        b_steps = capability_test_steps(self._control_options())
         return a_steps / (a_steps + b_steps), a_steps
 
     def _device(self) -> Any:
         """Return the inverter this entry's coordinators share."""
         return self.entry.runtime_data.inverter_coordinator.device
 
-    async def _async_control_test(self, share: float) -> dict[str, Any]:
+    async def _async_capability_test(self, share: float) -> dict[str, Any]:
         """Run part B, reporting into the tail of the same progress bar.
 
         The runner is built here rather than held, because it owns a shutdown
         hook for the window in which the inverter may be stopped and that hook
         should not outlive the run that armed it.
         """
-        from .control_test import ControlTestRunner
+        from .capability_test import CapabilityTestRunner
 
-        self._set(part=PART_B, step="starting the control test")
-        runner = ControlTestRunner(self.hass, self.entry)
+        self._set(part=PART_B, step="starting the capability test")
+        runner = CapabilityTestRunner(
+            self.hass, self.entry, forced_startup=self._forced_startup
+        )
         return await runner.async_run(
             on_progress=lambda fraction, label: self._on_progress(
                 share + fraction * (1.0 - share), f"{PART_B}: {label}"
@@ -275,39 +288,43 @@ class SurveyRunner:
     def _control_options(self) -> ControlOptions:
         """Return what part B has leave to do, from this entry's options."""
         return ControlOptions(
+            forced_startup=self._forced_startup,
             restart=bool(
                 self.entry.options.get(
-                    CONF_CONTROL_TEST_RESTART, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_RESTART, CAPABILITY_TEST_PERMISSION_DEFAULT
                 )
             ),
             enable_export_limit=bool(
                 self.entry.options.get(
-                    CONF_CONTROL_TEST_EXPORT, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_EXPORT, CAPABILITY_TEST_PERMISSION_DEFAULT
                 )
             ),
             cut_pv=bool(
                 self.entry.options.get(
-                    CONF_CONTROL_TEST_PV_CUT, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_PV_CUT, CAPABILITY_TEST_PERMISSION_DEFAULT
                 )
             ),
             charge_window=bool(
                 self.entry.options.get(
-                    CONF_CONTROL_TEST_CHARGE_WINDOW, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_CHARGE_WINDOW,
+                    CAPABILITY_TEST_PERMISSION_DEFAULT,
                 )
             ),
             discharge_window=bool(
                 self.entry.options.get(
-                    CONF_CONTROL_TEST_DISCHARGE_WINDOW, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_DISCHARGE_WINDOW,
+                    CAPABILITY_TEST_PERMISSION_DEFAULT,
                 )
             ),
             import_limit=bool(
                 self.entry.options.get(
-                    CONF_CONTROL_TEST_IMPORT_LIMIT, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_IMPORT_LIMIT,
+                    CAPABILITY_TEST_PERMISSION_DEFAULT,
                 )
             ),
         )
 
-    async def _async_run(self, control_test: bool = False) -> None:
+    async def _async_run(self, capability_test: bool = False) -> None:
         """Build the document, and end in a state either way.
 
         A failure is kept and shown rather than raised. Somebody who pressed
@@ -319,25 +336,25 @@ class SurveyRunner:
         Part B runs **after** part A and only if part A succeeded. Not for
         tidiness: part A is what establishes that this device answers, what it
         is and what it has, and writing to a device none of that is known about
-        is exactly the thing the control test's own guards exist to refuse.
+        is exactly the thing the capability test's own guards exist to refuse.
         """
-        # Imported here rather than at module level: `survey_document` imports
+        # Imported here rather than at module level: `diagnosis_document` imports
         # the library, and this module is imported by the platforms.
-        from .survey_document import async_build, attach_control_test
+        from .diagnosis_document import async_build, attach_capability_test
 
         share, _a_steps = (
             (1.0, 0)
             if self.entry.runtime_data.is_string_inverter
             else self._shares(
                 dict(self.entry.options),
-                control_test,
+                capability_test,
                 block_test.planned_steps(await block_test.inverter_blocks()),
             )
         )
         try:
             # Both parts run with this entry's own polling held off. They read
             # and write the same endpoint the coordinators do, over the same
-            # serialized connection, so without this a survey measures the
+            # serialized connection, so without this a diagnosis measures the
             # inverter *and* the contention it is causing -- and part B's power
             # sampling competes with tier polls for the whole of every window.
             async with self.entry.runtime_data.async_paused():
@@ -357,9 +374,9 @@ class SurveyRunner:
                     # `src/sungrow_modbus/hybrid_inverter/layout.py` is changed from.
                     allow_block_test=True,
                 )
-                if control_test:
-                    block = await self._async_control_test(share)
-                    attach_control_test(document, block, self._device())
+                if capability_test:
+                    block = await self._async_capability_test(share)
+                    attach_capability_test(document, block, self._device())
         except Exception as err:  # a button press must not be able to crash the loop
             # `exception`, not `warning`: this catches everything, so the type
             # alone is often useless -- a bare `KeyError: 'realtime'` says
@@ -368,7 +385,7 @@ class SurveyRunner:
             # an issue, and a traceback is the difference between a fix and a
             # conversation. The *state* keeps the short form, because that one
             # is read in a dialog.
-            _LOGGER.exception("Survey failed for %s", self.entry.title)
+            _LOGGER.exception("Diagnosis failed for %s", self.entry.title)
             self._set(
                 running=False,
                 step=None,
@@ -381,7 +398,7 @@ class SurveyRunner:
 
         # `values` is the decoded map, and its size is the number worth
         # showing: "95 of 104 fields" is how every summary in this project
-        # reports a survey, and the other 9 are named beside it.
+        # reports a diagnosis, and the other 9 are named beside it.
         readings = document.get("readings", {})
         decoded = (
             document["string_inverter"]["readings"]
@@ -397,17 +414,17 @@ class SurveyRunner:
             error=None,
             document=document,
             part=None,
-            control_test=document.get("control_test"),
+            capability_test=document.get("capability_test"),
         )
         try:
             self._async_offer_the_document(document)
-        # Deliberately broad, and logged rather than raised: the survey
+        # Deliberately broad, and logged rather than raised: the diagnosis
         # succeeded and its state already says so. Losing the announcement
         # is bad; losing it *silently* -- a bare asyncio traceback and a
         # device page claiming success -- is worse.
         except Exception:
             _LOGGER.exception(
-                "The survey for %s finished but could not be announced. "
+                "The diagnosis for %s finished but could not be announced. "
                 "The document is still on the device page, under Download "
                 "diagnostics",
                 self.entry.title,
@@ -445,8 +462,8 @@ class SurveyRunner:
         """
         # Imported late for the same reason as `async_build`: this module is
         # imported by the platforms, and `download` imports the HTTP stack.
+        from .diagnosis_document import summarise
         from .download import async_download_url
-        from .survey_document import summarise
 
         url = async_download_url(self.hass, self.entry)
         lapses = dt_util.now() + LINK_VALID
@@ -471,16 +488,16 @@ class SurveyRunner:
                 f'<a href="{url}" target="_blank">Download the document</a>'
                 " — this link stops working at "
                 f"{lapses.strftime('%H:%M')}. After that, press "
-                "**Run read only diagnosis** again for a fresh one, or use "
+                "**Run read-only diagnosis** again for a fresh one, or use "
                 "**Download diagnostics** on the device page, which carries "
                 "the same document and never expires.\n\n"
                 "It carries a stand-in serial rather than the real one, and "
                 "your address only if you allowed it. Send it to "
-                f"[the survey issue]({SURVEY_ISSUE_URL}) — what varies between "
+                f"[the diagnosis issue]({DIAGNOSIS_ISSUE_URL}) — what varies between "
                 "installations is the thing no specification has told this "
                 "project reliably."
             ),
-            title=f"Survey finished: {self.entry.title}",
+            title=f"Diagnosis finished: {self.entry.title}",
             notification_id=self._notification_id,
         )
         self._lapsed = async_call_later(self.hass, LINK_VALID, self._async_mark_lapsed)
@@ -488,7 +505,7 @@ class SurveyRunner:
     @property
     def _notification_id(self) -> str:
         """One id per entry, so a second run replaces rather than stacks."""
-        return f"{DOMAIN}_survey_{self.entry.entry_id}"
+        return f"{DOMAIN}_diagnosis_{self.entry.entry_id}"
 
     @callback
     def async_shutdown(self) -> None:
@@ -521,21 +538,21 @@ class SurveyRunner:
         if document is None:
             return
         # Imported late, as above.
-        from .survey_document import summarise
+        from .diagnosis_document import summarise
 
         persistent_notification.async_create(
             self.hass,
             (
                 f"{summarise(document)}\n\n"
                 "The download link in this notification has expired. Press "
-                "**Run read only diagnosis** again for a fresh one, or use "
+                "**Run read-only diagnosis** again for a fresh one, or use "
                 "**Download diagnostics** on the device page — that carries "
                 "the same document and never expires.\n\n"
                 "It carries a stand-in serial rather than the real one, and "
                 "your address only if you allowed it. Send it to "
-                f"[the survey issue]({SURVEY_ISSUE_URL})."
+                f"[the diagnosis issue]({DIAGNOSIS_ISSUE_URL})."
             ),
-            title=f"Survey finished: {self.entry.title}",
+            title=f"Diagnosis finished: {self.entry.title}",
             notification_id=self._notification_id,
         )
 
@@ -546,11 +563,11 @@ class SurveyRunner:
 
 
 @callback
-def async_runner(entry: SungrowConfigEntry) -> SurveyRunner:
+def async_runner(entry: SungrowConfigEntry) -> DiagnosisRunner:
     """Return the runner for one entry, from its runtime data."""
-    runner: SurveyRunner = entry.runtime_data.survey
+    runner: DiagnosisRunner = entry.runtime_data.diagnosis
     return runner
 
 
 Progress = Callable[[float, str], None]
-"""What `survey_document.async_build` calls after each read it can count."""
+"""What `diagnosis_document.async_build` calls after each read it can count."""

@@ -1,4 +1,4 @@
-"""Part B of the survey: write each control, read it back, and put it back.
+"""Part B of the diagnosis: write each control, read it back, and put it back.
 
 Part A asks what is here and answers it entirely by reading. This asks whether
 writing works -- whether a value sent to a register arrives at the scale
@@ -9,8 +9,8 @@ that being true.
 
 **Nothing here decides anything.** The procedure, the probe values, the
 verdicts, the restore order and the refusals all live in
-`sungrow_modbus.control_test`, which has no Home Assistant in it and is driven
-identically by `device-survey/scripts/python/sungrow_control_test.py`. What
+`sungrow_modbus.capability_test`, which has no Home Assistant in it and is driven
+identically by `device-diagnosis/scripts/python/sungrow_capability_test.py`. What
 lives here is the four things that need Home Assistant: a snapshot that
 survives a restart, a shutdown hook so a stopped inverter is started again, the
 progress callback the device page draws, and the options that say what this run
@@ -30,16 +30,16 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HassJob, HomeAssistant, callback
 from homeassistant.helpers.storage import Store
-from sungrow_modbus.control_test import ControlTest, Options, Snapshot, document
+from sungrow_modbus.capability_test import CapabilityTest, Options, Snapshot, document
 
 from .const import (
-    CONF_CONTROL_TEST_CHARGE_WINDOW,
-    CONF_CONTROL_TEST_DISCHARGE_WINDOW,
-    CONF_CONTROL_TEST_EXPORT,
-    CONF_CONTROL_TEST_IMPORT_LIMIT,
-    CONF_CONTROL_TEST_PV_CUT,
-    CONF_CONTROL_TEST_RESTART,
-    CONTROL_TEST_PERMISSION_DEFAULT,
+    CAPABILITY_TEST_PERMISSION_DEFAULT,
+    CONF_CAPABILITY_TEST_CHARGE_WINDOW,
+    CONF_CAPABILITY_TEST_DISCHARGE_WINDOW,
+    CONF_CAPABILITY_TEST_EXPORT,
+    CONF_CAPABILITY_TEST_IMPORT_LIMIT,
+    CONF_CAPABILITY_TEST_PV_CUT,
+    CONF_CAPABILITY_TEST_RESTART,
     DOMAIN,
 )
 
@@ -52,7 +52,7 @@ _LOGGER = logging.getLogger(__name__)
 #: may have two. Version 1; a future shape change bumps it and migrates, which
 #: is why the payload is a plain dict rather than the dataclass.
 STORE_VERSION = 1
-STORE_KEY = f"{DOMAIN}.control_test"
+STORE_KEY = f"{DOMAIN}.capability_test"
 
 
 def _store(hass: HomeAssistant, entry: SungrowConfigEntry) -> Store[dict[str, Any]]:
@@ -81,21 +81,32 @@ async def async_forget(hass: HomeAssistant, entry: SungrowConfigEntry) -> None:
     await _store(hass, entry).async_remove()
 
 
-class ControlTestRunner:
-    """Drives one entry's control test, and guarantees the inverter comes back.
+class CapabilityTestRunner:
+    """Drives one entry's capability test, and guarantees the inverter comes back.
 
-    Built by the survey runner for each run rather than standing alone, because
+    Built by the diagnosis runner for each run rather than standing alone, because
     the two share a connection and a Sungrow grants very few sessions: two of
     these at once on one endpoint would interleave their reads and their
     writes, and the writes are the half where that matters.
     """
 
-    def __init__(self, hass: HomeAssistant, entry: SungrowConfigEntry) -> None:
-        """Prepare a runner. Nothing is read or written until `async_run`."""
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: SungrowConfigEntry,
+        *,
+        forced_startup: bool = False,
+    ) -> None:
+        """Prepare a runner. Nothing is read or written until `async_run`.
+
+        `forced_startup` runs the forced startup check alone, the mode that
+        needs the inverter in low-SoC standby.
+        """
         self.hass = hass
         self.entry = entry
+        self.forced_startup = forced_startup
         self._remove_shutdown_job: Any = None
-        self._test: ControlTest | None = None
+        self._test: CapabilityTest | None = None
 
     def _options(self) -> Options:
         """Read what this run has leave to do, from the entry's options.
@@ -120,28 +131,38 @@ class ControlTestRunner:
         options = self.entry.options
         return Options(
             allow_dark=True,
+            forced_startup=self.forced_startup,
             restart=bool(
-                options.get(CONF_CONTROL_TEST_RESTART, CONTROL_TEST_PERMISSION_DEFAULT)
+                options.get(
+                    CONF_CAPABILITY_TEST_RESTART, CAPABILITY_TEST_PERMISSION_DEFAULT
+                )
             ),
             enable_export_limit=bool(
-                options.get(CONF_CONTROL_TEST_EXPORT, CONTROL_TEST_PERMISSION_DEFAULT)
+                options.get(
+                    CONF_CAPABILITY_TEST_EXPORT, CAPABILITY_TEST_PERMISSION_DEFAULT
+                )
             ),
             cut_pv=bool(
-                options.get(CONF_CONTROL_TEST_PV_CUT, CONTROL_TEST_PERMISSION_DEFAULT)
+                options.get(
+                    CONF_CAPABILITY_TEST_PV_CUT, CAPABILITY_TEST_PERMISSION_DEFAULT
+                )
             ),
             charge_window=bool(
                 options.get(
-                    CONF_CONTROL_TEST_CHARGE_WINDOW, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_CHARGE_WINDOW,
+                    CAPABILITY_TEST_PERMISSION_DEFAULT,
                 )
             ),
             discharge_window=bool(
                 options.get(
-                    CONF_CONTROL_TEST_DISCHARGE_WINDOW, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_DISCHARGE_WINDOW,
+                    CAPABILITY_TEST_PERMISSION_DEFAULT,
                 )
             ),
             import_limit=bool(
                 options.get(
-                    CONF_CONTROL_TEST_IMPORT_LIMIT, CONTROL_TEST_PERMISSION_DEFAULT
+                    CONF_CAPABILITY_TEST_IMPORT_LIMIT,
+                    CAPABILITY_TEST_PERMISSION_DEFAULT,
                 )
             ),
         )
@@ -162,7 +183,9 @@ class ControlTestRunner:
         if self._remove_shutdown_job is not None:
             return
         self._remove_shutdown_job = self.hass.async_add_shutdown_job(
-            HassJob(self._async_start_again, "sungrow control test: start the inverter")
+            HassJob(
+                self._async_start_again, "sungrow capability test: start the inverter"
+            )
         )
 
     @callback
@@ -176,14 +199,14 @@ class ControlTestRunner:
         """Start the inverter, from wherever this is called."""
         if self._test is not None:
             _LOGGER.warning(
-                "%s: the control test is stopping; starting the inverter first",
+                "%s: the capability test is stopping; starting the inverter first",
                 self.entry.title,
             )
             await self._test.async_ensure_running()
         self._disarm_shutdown_guard()
 
     async def async_run(self, on_progress: Any = None) -> dict[str, Any]:
-        """Run the procedure and return the block for the survey document."""
+        """Run the procedure and return the block for the diagnosis document."""
         runtime = self.entry.runtime_data
         coordinator = next(iter(runtime.coordinators.values()))
         store = _store(self.hass, self.entry)
@@ -196,7 +219,7 @@ class ControlTestRunner:
                 self._arm_shutdown_guard()
             await store.async_save(snapshot.to_dict())
 
-        self._test = ControlTest(
+        self._test = CapabilityTest(
             coordinator.device,
             options=self._options(),
             on_progress=on_progress,
@@ -204,7 +227,7 @@ class ControlTestRunner:
             sungrow_pack=self.entry.runtime_data.battery is not None,
         )
         _LOGGER.warning(
-            "%s: running the control test. It writes to every control this "
+            "%s: running the capability test. It writes to every control this "
             "integration can write to, and puts each one back.",
             self.entry.title,
         )
@@ -217,7 +240,7 @@ class ControlTestRunner:
             # Left deliberately. The next setup turns it into a repair, which
             # is the only thing that still works after the run is gone.
             _LOGGER.error(
-                "%s: the control test could not put %s back; the snapshot is kept "
+                "%s: the capability test could not put %s back; the snapshot is kept "
                 "so this can be repaired",
                 self.entry.title,
                 ", ".join(row.field for row in outcome.not_restored),
@@ -237,7 +260,7 @@ class ControlTestRunner:
         """
         runtime = self.entry.runtime_data
         coordinator = next(iter(runtime.coordinators.values()))
-        test = ControlTest(coordinator.device)
+        test = CapabilityTest(coordinator.device)
         if snapshot.stopped_at is not None:
             await test.async_ensure_running()
         results = await test.async_restore(snapshot)
