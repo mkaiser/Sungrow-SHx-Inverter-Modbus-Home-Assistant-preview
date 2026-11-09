@@ -174,6 +174,20 @@ CONF_CAPABILITY_TEST_DISCHARGE_WINDOW = "capability_test_discharge_window"
 #: watched write the integration needs before it offers it as a control.
 CONF_CAPABILITY_TEST_IMPORT_LIMIT = "capability_test_import_limit"
 
+#: Let the capability test write to the wallbox (21203, 21204, 21211, 21212,
+#: 21232) and put each setting back. **Off until switched on**, unlike every
+#: permission above: a wallbox is the one device whose test interrupts a car
+#: mid-charge, and only a measured owner has agreed to that.
+CONF_CAPABILITY_TEST_WALLBOX = "capability_test_wallbox"
+DEFAULT_CAPABILITY_TEST_WALLBOX = False
+
+#: The highest current the wallbox test may offer, in amperes. Never above the
+#: wallbox's own rating. Left unset it is `DEFAULT_WALLBOX_MAX_AMPS`, and the
+#: checks that go beyond that (below the minimum, above the rating, the
+#: fallback) wait until the owner has set it.
+CONF_WALLBOX_MAX_AMPS = "wallbox_max_amps"
+DEFAULT_WALLBOX_MAX_AMPS = 10.0
+
 #: Which slot of a multi-inverter YAML install this entry's device was.
 #:
 #: `""` for a single-inverter package, `"_inv_2"` for the second inverter of a
@@ -329,6 +343,26 @@ CONF_KIND = "kind"
 
 KIND_STRING_INVERTER = "string_inverter"
 """An SG: its own map, read only, no battery, no YAML package ids."""
+
+KIND_IHOMEMANAGER = "ihomemanager"
+"""An iHomeManager at unit 247: a diagnosis and nothing measured."""
+
+KIND_LOGGER = "logger"
+"""A Sungrow Logger at unit 247: a diagnosis and nothing measured."""
+
+#: Every kind whose entry is only a diagnosis, found at unit 247.
+UNIT_247_KINDS = (KIND_IHOMEMANAGER, KIND_LOGGER)
+
+#: Entry data: the endpoint speaks Modbus inside TLS (a Logger on 516).
+CONF_TLS = "tls"
+
+#: Plain ports an iHomeManager or a Logger may serve unit 247 on: 502-504 by
+#: Sungrow's iHomeManager document, 505 by a Logger1000A measured through.
+UNIT_247_PORTS: tuple[int, ...] = (502, 503, 504, 505)
+
+KIND_WALLBOX = "wallbox"
+"""A wallbox at its own address (TLS, port 516, unit 248), with no inverter
+beside it: read only, identified by its own serial."""
 
 #: A contributor who wants to send a reading should not have to answer the
 #: migration question at all: it decides which entity ids years of recorder
