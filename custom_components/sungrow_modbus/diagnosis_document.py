@@ -81,11 +81,11 @@ from .const import (
     CONF_EXPORT_WRITE_SCALE_PROBE,
     CONF_PUBLISH_ADDRESS,
     CONF_REPORTER,
-    CONF_WALLBOX_HOST,
     DEFAULT_DIAGNOSIS_DUMP,
 )
 from .coordinator import SungrowConfigEntry
 from .diagnosis import Progress
+from .network_records import async_network_names
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,7 +103,6 @@ def planned_steps(
     block_reads: int = 0,
     *,
     wallbox: bool = False,
-    wallbox_direct: bool = False,
 ) -> int:
     """Count the reads a diagnosis will report progress for, before it starts.
 
@@ -119,27 +118,17 @@ def planned_steps(
     on it is most of the bar, so getting it wrong would not be a rounding
     error. A caller sharing one bar between this and the capability test needs the
     number without starting a diagnosis, which is why it is a function.
+
+    An inverter entry's wallbox is the one behind its dongle, read with the
+    dongle's bands; a wallbox at its own address is an entry of its own, with a
+    read of its own (`device_diagnosis.wallbox_builder`).
     """
     total = len(diagnosis.PROBES) + 1 + block_reads
     if dumping:
         total += register_dump.block_count()
         if wallbox:
-            total += register_dump.block_count(wallbox_bands(wallbox_direct))
+            total += register_dump.block_count(register_dump.WALLBOX_BANDS)
     return total
-
-
-def wallbox_bands(direct: bool) -> tuple[tuple[str, int, int, str], ...]:
-    """Return the wallbox's dump bands for the path it is read on.
-
-    Its own address over TLS answers a read only where a data point starts,
-    so it gets bands cut to measured starts; a WiNet-S answers any start.
-    """
-    return register_dump.WALLBOX_TLS_BANDS if direct else register_dump.WALLBOX_BANDS
-
-
-def wallbox_is_direct(coordinator: Any) -> bool:
-    """Whether this wallbox is read at its own address rather than through a dongle."""
-    return bool(coordinator.config_entry.options.get(CONF_WALLBOX_HOST))
 
 
 def _testimony(options: Mapping[str, Any]) -> dict[str, str]:
@@ -179,6 +168,7 @@ async def async_build(
     *,
     allow_dump: bool = False,
     allow_block_test: bool = False,
+    allow_network_names: bool = False,
 ) -> dict[str, Any]:
     """Return one publishable diagnosis document for this entry.
 
@@ -200,6 +190,11 @@ async def async_build(
     progress bar and a notification at the end. The diagnostics download
     cannot: it is a button somebody waits on, so it leaves this False and the
     option has no effect there, however the owner set it.
+
+    `allow_network_names` adds what the device says about itself beside
+    Modbus (`network_records`): a two-second mDNS browse, a reverse-DNS
+    lookup and an ARP read. The button's, like the block test; the download
+    leaves it off, because somebody is waiting on it.
 
     `allow_block_test` is the same decision for the block read test, which is
     not an option at all: the diagnosis button always runs it and the download
@@ -231,8 +226,6 @@ async def async_build(
         dumping,
         block_test.planned_steps(blocks) if blocks else 0,
         wallbox=runtime.wallbox is not None,
-        wallbox_direct=runtime.wallbox is not None
-        and wallbox_is_direct(runtime.wallbox),
     )
     done = 0
 
@@ -280,6 +273,13 @@ async def async_build(
         ),
         battery_pack=collected.battery_pack,
         steps_lost={str(step): why for step, why in collected.failed.items()},
+        network_names=(
+            await async_network_names(
+                hass, entry.data.get(CONF_HOST, ""), [collected.serial]
+            )
+            if allow_network_names
+            else None
+        ),
     )
     attach_export_scale(document, entry, device)
     return document
@@ -544,8 +544,8 @@ async def _async_wallbox(
     if coordinator is None:
         return None
     device = coordinator.device
-    direct = wallbox_is_direct(coordinator)
-    path = "tls" if direct else "dongle"
+    # An inverter entry reads its wallbox through the dongle, never directly.
+    path = "dongle"
     if not dumping:
         found = wallbox_reader.readings(
             await wallbox_reader.async_mapped_words(device.async_read_words)
@@ -567,6 +567,6 @@ async def _async_wallbox(
     raw = await register_dump.async_dump(
         device.async_read_words,
         on_progress=on_block,
-        bands=wallbox_bands(direct),
+        bands=register_dump.WALLBOX_BANDS,
     )
     return diagnosis.wallbox_from_dump(device.unit_id, raw, path=path)

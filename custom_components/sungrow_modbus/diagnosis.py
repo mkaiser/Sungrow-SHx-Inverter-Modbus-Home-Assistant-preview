@@ -552,18 +552,13 @@ class DiagnosisRunner:
         A's. The alternative -- a bar that resets, or a second bar -- is worse
         for the person watching, and the step label names the part throughout.
         """
-        from .diagnosis_document import (
-            planned_steps as diagnosis_steps,
-            wallbox_is_direct,
-        )
+        from .diagnosis_document import planned_steps as diagnosis_steps
 
         dumping = bool(options.get(CONF_DIAGNOSIS_DUMP, DEFAULT_DIAGNOSIS_DUMP))
         a_steps = diagnosis_steps(
             dumping,
             block_reads,
             wallbox=self.entry.runtime_data.wallbox is not None,
-            wallbox_direct=self.entry.runtime_data.wallbox is not None
-            and wallbox_is_direct(self.entry.runtime_data.wallbox),
         )
         if not capability_test:
             return 1.0, a_steps
@@ -743,6 +738,9 @@ class DiagnosisRunner:
                     # Likewise only here, and not an option: the measurement
                     # `src/sungrow_modbus/hybrid_inverter/layout.py` is changed from.
                     allow_block_test=True,
+                    # What decides whether Home Assistant could have found
+                    # this device by itself: mDNS, DHCP name, MAC prefix.
+                    allow_network_names=True,
                 )
                 if capability_test:
                     block = await self._async_capability_test(share)
