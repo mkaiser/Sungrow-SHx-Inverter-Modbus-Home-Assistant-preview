@@ -20,6 +20,14 @@ alive: a wallbox drops a quiet one after 60 s and applies its fallback current.
 **Nothing writes at setup.** A snapshot left by a run that did not finish is
 logged when the entry loads and put back first thing in the next run, which is
 an explicit act with leave.
+
+**A wallbox an inverter manages is tested at the inverter.** Its own registers
+are the inverter's to drive (gerd, 2026-11-14), so where an inverter entry in
+this Home Assistant left the wallbox to this entry (`wallbox_elsewhere`), a run
+is `sungrow_modbus.wallbox.managed_test`: it writes that inverter entry's EV
+charger block, reads this entry's wallbox for what the car does, and holds both
+entries' polling off. A wallbox with no inverter entry beside it is not written
+from here at all: nothing an entry has can say no inverter manages it.
 """
 
 from __future__ import annotations
@@ -31,7 +39,12 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
-from sungrow_modbus.wallbox import capability_test as wct, ledger, plausibility
+from sungrow_modbus.wallbox import (
+    capability_test as wct,
+    ledger,
+    managed_test as mt,
+    plausibility,
+)
 
 from .const import (
     CONF_CAPABILITY_TEST_WALLBOX,
@@ -42,6 +55,7 @@ from .const import (
     DOMAIN,
     KIND_WALLBOX,
 )
+from .repairs import async_clear_wallbox, async_raise_wallbox
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -135,35 +149,71 @@ def consented(entry: SungrowConfigEntry) -> bool:
     )
 
 
+def declared_standalone(entry: SungrowConfigEntry) -> bool:
+    """Whether the owner has said no inverter manages this wallbox.
+
+    Never, yet: no option asks it, and a wrong yes writes registers an inverter
+    overwrites. The one seam the tests of the write machinery replace.
+    """
+    return False
+
+
+def managing_entry(
+    hass: HomeAssistant | None, entry: SungrowConfigEntry
+) -> SungrowConfigEntry | None:
+    """Return the loaded inverter entry that manages this entry's wallbox, or None.
+
+    The inverter entry that found this wallbox behind its dongle and left it to
+    this entry (`SungrowRuntimeData.wallbox_elsewhere`). Behind the dongle means
+    on the inverter's bus, which is what an inverter manages.
+    """
+    if hass is None or entry.data.get(CONF_KIND) != KIND_WALLBOX or not entry.unique_id:
+        return None
+    for other in hass.config_entries.async_entries(DOMAIN):
+        if other.entry_id == entry.entry_id:
+            continue
+        runtime = getattr(other, "runtime_data", None)
+        if getattr(runtime, "wallbox_elsewhere", None) == entry.unique_id:
+            return other
+    return None
+
+
 def transport_of(entry: SungrowConfigEntry) -> str:
     """Name the path to the wallbox: its own address, or the dongle."""
     return "tls" if entry.data.get(CONF_KIND) == KIND_WALLBOX else "dongle"
 
 
-def check_options(entry: SungrowConfigEntry) -> dict[str, bool]:
-    """Return the checks the entry's leave allows: all of them, or none.
+def check_options(
+    entry: SungrowConfigEntry, hass: HomeAssistant | None = None
+) -> dict[str, bool]:
+    """Return the checks the entry's leave allows, by who drives the wallbox.
 
-    The cap decides the three that go beyond the default (`cap_explicit`); the
-    library skips those, and says why, until the owner has set it.
+    A wallbox declared standalone gets its own registers' checks; one an
+    inverter entry here manages gets the inverter's (`managed`) and start/stop;
+    any other gets none, so auto repeat waits for nothing it cannot do. The cap
+    decides the checks that go beyond the default (`cap_explicit`).
     """
     on = consented(entry)
+    alone = on and declared_standalone(entry)
+    managed = on and not alone and managing_entry(hass, entry) is not None
     return {
-        "follow": on,
-        "below_minimum": on,
-        "above_rating": on,
-        "start_stop": on,
-        "enable": on,
-        "phase": on,
-        "phase_charging": on,
-        "fallback": on,
-        "mileage": on,
+        "standalone": alone,
+        "follow": alone,
+        "below_minimum": alone,
+        "above_rating": alone,
+        "start_stop": alone or managed,
+        "enable": alone,
+        "phase": alone,
+        "phase_charging": alone,
+        "fallback": alone,
+        "managed": managed,
     }
 
 
 def run_options(
     entry: SungrowConfigEntry, skip: frozenset[str] = frozenset()
 ) -> wct.Options:
-    """Return what a run may do: the leave, the cap, and what is not yet known.
+    """Return what a run of the wallbox's own checks may do.
 
     `skip` names the checks earlier runs established, which auto repeat leaves
     out so that a run every half hour does not stop a car for answers kept.
@@ -174,17 +224,56 @@ def run_options(
     for name, (_need, option) in ledger.CHECKS.items():
         if option is not None:
             owned.setdefault(option, []).append(name)
+    fields = wct.Options.__dataclass_fields__
     wanted = {
         option: allowed and not all(name in skip for name in owned[option])
         for option, allowed in check_options(entry).items()
+        if option in fields and option != "standalone"
     }
     return wct.Options(
         leave=consented(entry),
         max_amps=float(cap) if cap else DEFAULT_WALLBOX_MAX_AMPS,
         cap_explicit=bool(cap),
         current="output current" not in skip,
+        # Nothing here can tell a wallbox an inverter manages from one no
+        # inverter does, and a managed one overwrites every write (gerd,
+        # 2026-11-14): unless declared, the library writes nothing and says why.
+        standalone=declared_standalone(entry),
         **wanted,
     )
+
+
+def managed_run_options(
+    entry: SungrowConfigEntry, skip: frozenset[str] = frozenset()
+) -> mt.Options:
+    """Return what a run at the managing inverter may do, the owner's leave first."""
+    cap = entry.options.get(CONF_WALLBOX_MAX_AMPS)
+    return mt.Options(
+        leave=consented(entry),
+        max_amps=float(cap) if cap else DEFAULT_WALLBOX_MAX_AMPS,
+        current="user current" not in skip,
+        floor="floor" not in skip,
+        start_stop="start/stop" not in skip,
+    )
+
+
+class InverterBlockPort:
+    """The managing inverter entry's own connection, as the managed test's port."""
+
+    def __init__(self, device: Any) -> None:
+        """Bind the inverter device that entry polls."""
+        self._device = device
+
+    async def read(self, address: int, count: int) -> list[int]:
+        """Read holding words on that entry's connection."""
+        words: list[int] = await self._device.async_read_words(
+            "holding", address, count
+        )
+        return words
+
+    async def write(self, address: int, word: int) -> None:
+        """Write one holding word."""
+        await self._device.async_write_word(address, word)
 
 
 # -- the snapshot ---------------------------------------------------------------
@@ -200,7 +289,75 @@ async def async_leftover(
     return {
         "raw": {int(a): int(w) for a, w in (data.get("raw") or {}).items()},
         "touched": [int(a) for a in data["touched"]],
+        "managed": bool(data.get("managed")),
+        "charging_at_start": bool(data.get("charging_at_start")),
     }
+
+
+async def async_put_back(
+    leftover: dict[str, Any],
+    port: EntryWallboxPort,
+    inverter: InverterBlockPort | None,
+) -> bool:
+    """Put a leftover snapshot back, and say whether the house is as it was.
+
+    Checked on the house, not only on the words: a word read back after a
+    desync can be anybody's, so a standalone wallbox whose enable was touched
+    must also not report status 8 (*disabled*); the managed test checks that
+    the charge is back. A managed leftover needs the inverter that manages it.
+    """
+    if leftover["managed"]:
+        if inverter is None:
+            return False
+        managed = mt.ManagedWallboxTest(inverter, port, mt.Options())
+        managed.snapshot = leftover
+        await managed.async_restore()
+        return bool(managed.restored)
+    restorer = wct.WallboxCapabilityTest(port, wct.Options())
+    restorer.snapshot = leftover
+    await restorer.async_restore()
+    if any(not row.restored for row in restorer.restores):
+        return False
+    if wct.ENABLED in leftover["touched"] and leftover["raw"].get(wct.ENABLED) == 1:
+        status = (await port.read_fresh("input", wct.CHARGING_STATUS_ADDRESS, 1))[0]
+        return status != wct.DISABLED_STATUS
+    return True
+
+
+async def async_restore_leftover(
+    hass: HomeAssistant, entry: SungrowConfigEntry
+) -> bool:
+    """Put back what an unfinished run left, for the repair; True when done.
+
+    The entry's own polling is held off, and a managed run's inverter entry's
+    too, as during a run. The issue comes down only on success.
+    """
+    from .repairs import async_clear_wallbox
+
+    leftover = await async_leftover(hass, entry)
+    if leftover is None:
+        async_clear_wallbox(hass, entry)
+        return True
+    wallbox = entry.runtime_data.wallbox
+    if wallbox is None:
+        return False
+    port = EntryWallboxPort(wallbox.device)
+    inverter_entry = managing_entry(hass, entry) if leftover["managed"] else None
+    if leftover["managed"] and inverter_entry is None:
+        return False
+    async with entry.runtime_data.async_paused():
+        if inverter_entry is None:
+            done = await async_put_back(leftover, port, None)
+        else:
+            inverter = InverterBlockPort(
+                inverter_entry.runtime_data.inverter_coordinator.device
+            )
+            async with inverter_entry.runtime_data.async_paused():
+                done = await async_put_back(leftover, port, inverter)
+    if done:
+        await snapshot_store(hass, entry).async_remove()
+        async_clear_wallbox(hass, entry)
+    return done
 
 
 def _snapshot_data(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -209,6 +366,8 @@ def _snapshot_data(snapshot: dict[str, Any]) -> dict[str, Any]:
         "raw": {str(a): w for a, w in snapshot["raw"].items()},
         "touched": list(snapshot["touched"]),
         "taken_at": dt_util.utcnow().isoformat(),
+        "managed": bool(snapshot.get("managed")),
+        "charging_at_start": bool(snapshot.get("charging_at_start")),
     }
 
 
@@ -332,11 +491,15 @@ class WallboxTestRunner:
         assert coordinator is not None
         return coordinator.device
 
-    async def _async_restore_leftover(self, port: EntryWallboxPort) -> None:
+    async def _async_restore_leftover(
+        self, port: EntryWallboxPort, inverter: InverterBlockPort | None = None
+    ) -> None:
         """Put back what a run that never finished left, before anything else.
 
         Before a new snapshot replaces it: the new one would record the
-        leftover's values as the owner's.
+        leftover's values as the owner's. A managed run's snapshot is the
+        inverter's block and goes back through the inverter entry; without one
+        it cannot, and the run is refused.
         """
         leftover = await async_leftover(self.hass, self.entry)
         if leftover is None:
@@ -346,14 +509,29 @@ class WallboxTestRunner:
             "back before this run",
             self.entry.title,
         )
-        restorer = wct.WallboxCapabilityTest(port, wct.Options())
-        restorer.snapshot = leftover
-        await restorer.async_restore()
-        if any(not row.restored for row in restorer.restores):
-            # Kept: the registers still hold a test's values, and a new snapshot
-            # would call them the owner's. The run is refused, not attempted.
-            raise wct.Guard(5, "the wallbox settings of an earlier run are not back")
+        if leftover["managed"] and inverter is None:
+            raise wct.Guard(
+                5, "an earlier run's inverter settings are not back: no inverter"
+            )
+        if not await async_put_back(leftover, port, inverter):
+            # Kept: the registers still hold a test's values, and a new
+            # snapshot would call them the owner's. The run is refused, and
+            # the owner is told in Repairs.
+            await self._async_raise(leftover)
+            raise wct.Guard(
+                5,
+                f"an earlier run left the house changed: {mt.ON_SITE}"
+                if leftover["managed"]
+                else "the wallbox settings of an earlier run are not back",
+            )
         await snapshot_store(self.hass, self.entry).async_remove()
+        async_clear_wallbox(self.hass, self.entry)
+
+    async def _async_raise(self, leftover: dict[str, Any] | None = None) -> None:
+        """Raise the Repairs issue for what a run left changed."""
+        leftover = leftover or await async_leftover(self.hass, self.entry)
+        if leftover is not None:
+            await async_raise_wallbox(self.hass, self.entry, leftover)
 
     def request_stop(self) -> None:
         """Not interruptible mid-step: a step ends in seconds and a restore follows."""
@@ -362,6 +540,9 @@ class WallboxTestRunner:
         self, on_progress: Callable[[str], None] | None = None
     ) -> dict[str, Any]:
         """Run the procedure and return the run's block for the ledger."""
+        inverter_entry = managing_entry(self.hass, self.entry)
+        if inverter_entry is not None:
+            return await self._async_run_managed(inverter_entry, on_progress)
         device = self._device()
         port = EntryWallboxPort(device)
         store = snapshot_store(self.hass, self.entry)
@@ -405,8 +586,10 @@ class WallboxTestRunner:
                 self.entry.title,
                 ", ".join(str(row.address + 1) for row in outcome.not_restored),
             )
+            await self._async_raise()
         else:
             await store.async_remove()
+            async_clear_wallbox(self.hass, self.entry)
         return ledger.block(
             outcome,
             options,
@@ -414,3 +597,58 @@ class WallboxTestRunner:
             fresh=port.fresh,
             firmware=firmware_of(device),
         )
+
+    async def _async_run_managed(
+        self,
+        inverter_entry: SungrowConfigEntry,
+        on_progress: Callable[[str], None] | None,
+    ) -> dict[str, Any]:
+        """Test the wallbox at the inverter that manages it; keep the run."""
+        device = self._device()
+        reader = EntryWallboxPort(device)
+        port = InverterBlockPort(
+            inverter_entry.runtime_data.inverter_coordinator.device
+        )
+        store = snapshot_store(self.hass, self.entry)
+        options = managed_run_options(self.entry, self.skip)
+
+        async def keep(snapshot: dict[str, Any]) -> None:
+            # Before the first write, and awaited, as for the wallbox's own test.
+            await store.async_save(_snapshot_data({**snapshot, "managed": True}))
+
+        # The inverter entry polls the same inverter: held off as this one is.
+        async with inverter_entry.runtime_data.async_paused():
+            try:
+                await self._async_restore_leftover(reader, port)
+            except wct.Guard as guard:
+                return ledger.managed_block(
+                    mt.Outcome(guard.code, (), False, {"guard": guard.reason}),
+                    options,
+                    firmware=firmware_of(device),
+                )
+            test = mt.ManagedWallboxTest(
+                port,
+                reader,
+                options,
+                on_snapshot=keep if options.leave else None,
+                on_step=on_progress,
+            )
+            _LOGGER.warning(
+                "%s: running the wallbox capability test at the inverter that "
+                "manages it (%s). It writes the inverter's EV charger settings "
+                "and puts them back, the charge included.",
+                self.entry.title,
+                inverter_entry.title,
+            )
+            outcome = await test.async_run()
+        if outcome.restored:
+            await store.async_remove()
+            async_clear_wallbox(self.hass, self.entry)
+        else:
+            _LOGGER.error(
+                "%s: the wallbox capability test left the house changed: %s",
+                self.entry.title,
+                mt.ON_SITE,
+            )
+            await self._async_raise()
+        return ledger.managed_block(outcome, options, firmware=firmware_of(device))
