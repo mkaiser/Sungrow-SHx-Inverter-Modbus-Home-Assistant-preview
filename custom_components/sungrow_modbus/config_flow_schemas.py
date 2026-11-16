@@ -58,7 +58,7 @@ from .const import (
     ROLE_MASTER,
     ROLE_SLAVE,
 )
-from .wifi_module import is_sungrow_mac
+from .wifi_module import is_locally_administered, is_sungrow_mac, virtual_nic_vendor
 
 STEP_USER_DATA_SCHEMA = probatio.Schema(
     {
@@ -416,6 +416,24 @@ def _roles(
     return roles
 
 
+def _address_order(host: str) -> tuple[int, bytes, str]:
+    """Order a host as an address, not as text.
+
+    Sorted as text, `.125` comes before `.35` and `.9` comes last, because
+    the octets are compared character by character. That is stable but
+    arbitrary, and it is not idle: where two cards tie on everything the
+    wire measured -- the proxy-and-inverter pair, which answer one serial
+    over one route -- this is the tiebreak that picks the default offer.
+
+    A hostname has no numeric order, so it sorts after the addresses and
+    among its own kind by name.
+    """
+    try:
+        return (0, ip_address(host).packed, "")
+    except ValueError:
+        return (1, b"", host)
+
+
 def _described(
     found: dict[str, dict[str, Any]], local: Collection[str] = ()
 ) -> dict[str, dict[str, Any]]:
@@ -465,10 +483,19 @@ def _described(
     or a container bridge there is **no answer**, which says nothing rather
     than accusing a device.
 
-    A note and not a ranking, deliberately. Sungrow could register a second
-    prefix tomorrow, and the cost of being wrong that way is telling
-    somebody their inverter is a proxy; the cost of a missing note is only
-    that two cards read alike, which is where this started.
+    A merely foreign prefix is a note and not a ranking, deliberately.
+    Sungrow could register a second prefix tomorrow, and a communication
+    module carries its own maker's prefix anyway (a RAK stick is
+    `AC:1F:09`), so the cost of being wrong that way is telling somebody
+    their inverter is a proxy; the cost of a missing note is only that two
+    cards read alike, which is where this started.
+
+    Two prefixes are the exception, and do rank. A **locally administered**
+    one says no manufacturer issued the port, which no inverter and no
+    dongle can be, and which no future registration can overturn -- IEEE
+    issues none with that bit set. A **hypervisor's** one says the same
+    thing positively, for the hypervisors that hold a registered block and
+    so pass that test (`VIRTUAL_MAC_PREFIXES`).
     """
     by_serial: dict[str, list[str]] = {}
     for host, entry in found.items():
@@ -497,7 +524,23 @@ def _described(
                 entry["proxy"] = True
                 notes.append("Home Assistant's own address, so a Modbus proxy")
             prefix = entry.get("mac_prefix")
-            if prefix and not is_sungrow_mac(prefix):
+            hypervisor = virtual_nic_vendor(prefix) if prefix else None
+            if hypervisor:
+                entry["proxy"] = True
+                notes.append(
+                    f"{prefix} is {hypervisor}'s, which issues it to a port it "
+                    "invented, so what answers here is a host relaying: a "
+                    "Modbus proxy"
+                )
+            elif prefix and is_locally_administered(prefix):
+                entry["proxy"] = True
+                notes.append(
+                    f"{prefix} is a locally administered prefix -- software "
+                    "invented this address rather than a maker issuing it, so "
+                    "what answers here is a host relaying, not a Sungrow port: "
+                    "a Modbus proxy"
+                )
+            elif prefix and not is_sungrow_mac(prefix):
                 notes.append(
                     f"the hardware at this address is {prefix}, not Sungrow's "
                     "AC:19:9F, so something here is relaying: a Modbus proxy, "
@@ -544,7 +587,8 @@ def _described(
     # the same path and shares the inverter's one Modbus port rather than
     # taking it -- but *within* a route rather than across one, so a proxy in
     # front of a dongle never outranks a cable. Then unit 1 before a slave's
-    # address, then the address, so the order is stable.
+    # address, and last the address itself, read as an address rather than
+    # as text (`_address_order`), so the order is both stable and sensible.
     return dict(
         sorted(
             found.items(),
@@ -552,7 +596,7 @@ def _described(
                 not item[1].get("direct"),
                 not item[1].get("proxy"),
                 item[1][CONF_UNIT_ID] != DEFAULT_UNIT_ID,
-                item[0],
+                _address_order(item[0]),
             ),
         )
     )
