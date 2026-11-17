@@ -155,6 +155,13 @@ async def _async_run_capability_test(call: ServiceCall) -> None:
     entry = _async_entry_for(call.hass, call.data[ATTR_DEVICE_ID])
     _refuse_on_string_inverter(entry)
     await _async_authorize(call, entry, PERMISSION_CAPABILITY_TEST)
+    # The same gate the button has: a run that writes is read against the
+    # house it ran in, and a script is no more able to say what the house is
+    # than a press is (`testimony.py`). Imported here rather than at the top,
+    # because `testimony` is imported by the entities that import this module.
+    from .testimony import async_refuse_if_unanswered
+
+    async_refuse_if_unanswered(entry)
     _LOGGER.warning(
         "%s: capability test requested through the %s.%s action by %s. It writes to "
         "every control this integration can write to, and puts each one back.",
@@ -298,25 +305,26 @@ def _async_entry_for(hass: HomeAssistant, device_id: str) -> SungrowConfigEntry:
             translation_placeholders={"device_id": device_id},
         )
 
-    for entry_id in device.config_entries:
-        entry = hass.config_entries.async_get_entry(entry_id)
-        if entry is not None and entry.domain == DOMAIN:
-            if not hasattr(entry, "runtime_data"):
-                raise ServiceValidationError(
-                    translation_domain=DOMAIN,
-                    translation_key="entry_not_loaded",
-                    translation_placeholders={"title": entry.title},
-                )
-            if entry.runtime_data.is_wallbox_only or entry.runtime_data.is_device_only:
-                raise ServiceValidationError(
-                    translation_domain=DOMAIN,
-                    translation_key="not_on_wallbox",
-                    translation_placeholders={"title": entry.title},
-                )
-            return entry
-
-    raise ServiceValidationError(
-        translation_domain=DOMAIN,
-        translation_key="not_a_sungrow_device",
-        translation_placeholders={"name": device.name or device_id},
-    )
+    # `config_entry_id`, not `config_entries`: a device belongs to one entry,
+    # and the set is a deprecated property over this attribute that core
+    # removes in 2027.10. Iterating it logged a warning on every action call.
+    entry = hass.config_entries.async_get_entry(device.config_entry_id)
+    if entry is None or entry.domain != DOMAIN:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="not_a_sungrow_device",
+            translation_placeholders={"name": device.name or device_id},
+        )
+    if not hasattr(entry, "runtime_data"):
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="entry_not_loaded",
+            translation_placeholders={"title": entry.title},
+        )
+    if entry.runtime_data.is_wallbox_only or entry.runtime_data.is_device_only:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="not_on_wallbox",
+            translation_placeholders={"title": entry.title},
+        )
+    return entry

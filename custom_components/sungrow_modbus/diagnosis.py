@@ -39,14 +39,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.util import dt as dt_util
 from sungrow_modbus import block_test, string_inverter
 from sungrow_modbus.capability_test import (
@@ -187,6 +187,13 @@ class DiagnosisState:
         return round(self.fraction * 100)
 
 
+#: How often the polled readings are fed to the plausibility checks. One
+#: minute, and deliberately the same as auto repeat's tick: the checks that
+#: want "a day of polls" count ticks, and 1440 of them is a day only at this
+#: cadence.
+OBSERVE_EVERY = timedelta(minutes=1)
+
+
 class DiagnosisRunner:
     """Owns one entry's diagnosis: starts it, tracks it, announces it."""
 
@@ -223,8 +230,8 @@ class DiagnosisRunner:
         self._stop_requested = False
         #: Part B's runner while it is in flight, so a stop can reach it.
         self._capability_runner: Any = None
-        #: The readings checked against each other, fed by auto repeat's
-        #: tick and kept per firmware (`capability_test.PLAUSIBILITY_KEY`).
+        #: The readings checked against each other, fed by this runner's own
+        #: timer and kept per firmware (`capability_test.PLAUSIBILITY_KEY`).
         self.plausibility = Plausibility()
         self._plausibility_firmware: str | None = None
         #: The wallbox's kept runs, folded (`sungrow_modbus.wallbox.ledger`).
@@ -232,6 +239,22 @@ class DiagnosisRunner:
         #: The wallbox's readings checked against each other, kept per firmware.
         self.wallbox_plausibility = wallbox_plausibility.WallboxPlausibility()
         self._wallbox_firmware: str | None = None
+        #: The readings' own checks are fed on their own timer, not auto
+        #: repeat's, because **they write nothing**. Auto repeat is a leave to
+        #: write, and gating a read-only accumulation behind it meant a house
+        #: whose owner never switched it on could never settle a plausibility
+        #: check, and that parking auto repeat for another test silently lost
+        #: whatever the house did meanwhile -- a 4.5 kW charge, measured on
+        #: 2026-11-17, produced no observations at all. One minute, because
+        #: the checks that want "a day of polls" count ticks and a day is
+        #: 1440 of them; the coordinator's own interval would reach that in
+        #: two hours and mean something else. Bounded by `MAX_RATIOS`.
+        #: Started by `_async_start_observing` once the kept readings are
+        #: loaded, and cancelled on shutdown. Not started in the constructor:
+        #: a timer begun there outlives any runner built without a matching
+        #: shutdown, which Home Assistant's harness reports as a lingering
+        #: timer and which would be a real leak in a failed setup.
+        self._observing: CALLBACK_TYPE | None = None
 
     @property
     def tests(self) -> dict[str, Any] | None:
@@ -851,6 +874,9 @@ class DiagnosisRunner:
                 )
             )
             await self._async_warn_wallbox_leftover()
+        # Now that the kept readings are loaded -- starting any earlier is
+        # pointless, because the load above replaces the object.
+        self._async_start_observing()
         self._set(capability_test=self._folded)
 
     async def _async_warn_wallbox_leftover(self) -> None:
@@ -1064,7 +1090,47 @@ class DiagnosisRunner:
         what Home Assistant's own test harness calls a lingering timer.
         """
         self._async_cancel_lapse()
+        if self._observing is not None:
+            self._observing()
+            self._observing = None
         self.continuous.async_turn_off("the entry was unloaded")
+
+    @callback
+    def _async_start_observing(self) -> None:
+        """Begin feeding the readings, once the kept ones are loaded.
+
+        Called from `async_load_ledger` rather than the constructor, so the
+        timer is created exactly where the entry registers the shutdown that
+        cancels it, and so a runner built without one never starts it. The
+        first reading is taken at once: auto repeat reads "nothing left to
+        watch" from an `unsettled()` that is empty while nothing has been
+        observed, and would switch itself off on its first tick.
+        """
+        if self._observing is not None:
+            return
+        self._observing = async_track_time_interval(
+            self.hass, self._async_observe_tick, OBSERVE_EVERY
+        )
+        self._async_observe_tick(dt_util.utcnow())
+
+    @callback
+    def _async_observe_tick(self, now: datetime) -> None:
+        """Feed the polled readings to the checks that need days of them.
+
+        Skipped while a run has the link: its writes are what the house is
+        answering then, so the readings are not the undisturbed house these
+        checks are about.
+        """
+        if self.state.running:
+            return
+        self.async_observe(now)
+        # Tell the entities. The counters and the test summary are computed
+        # from the collection, so without this they show whatever they showed
+        # when something else last changed -- which, now that observing no
+        # longer rides on auto repeat's tick, can be hours. Measured at the
+        # maintainer's on 2026-11-17: the store held 811 observations while
+        # the summary still said 745.
+        self.async_notify()
 
     @callback
     def _async_cancel_lapse(self) -> None:

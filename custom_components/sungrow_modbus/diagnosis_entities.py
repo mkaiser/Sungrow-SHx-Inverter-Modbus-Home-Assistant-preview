@@ -57,6 +57,7 @@ from .const import (
 )
 from .entity import EnglishEntityId
 from .services import async_authorize
+from .testimony import async_check, async_refuse_if_unanswered
 from .write_owner import holder
 
 if TYPE_CHECKING:
@@ -195,17 +196,40 @@ class DiagnosisModeSelect(DiagnosisEntity, SelectEntity, RestoreEntity):
     starts nothing, and after a restart auto repeat runs only once a person
     presses Start again. A string inverter has no capability test, so it is
     offered read-only alone.
+
+    A fresh entry sits at *Extended test (auto repeat)*; an entry that has
+    chosen a mode before keeps its own.
     """
 
     def __init__(self, runtime_data: SungrowRuntimeData) -> None:
-        """Offer the modes this inverter has."""
+        """Offer the modes this inverter has, starting at auto repeat.
+
+        **Auto repeat is the mode the project wants run** (maintainer,
+        2026-11-16): one read-only pass settles almost nothing that is still
+        open, while a collection across a day and a night is what the
+        capability ledger is built from. A string inverter has no capability
+        test and is offered read-only alone, so it starts there.
+
+        It is still a choice and not a leave: this entity starts nothing.
+        What starts a run is a press of *Diagnosis: start*, which on anything
+        but read-only is held to the `capability_test` permission
+        (administrators by default) -- and that press now grants leave to
+        write without the mode having been touched, where before it took a
+        deliberate pick. Everything else that guards a run is unchanged: the
+        per-check consents in the options, the engine's own refusals, and the
+        restore.
+        """
         super().__init__(runtime_data, "diagnosis_mode")
         self._attr_options = (
             [DIAGNOSIS_MODE_READ_ONLY]
             if runtime_data.is_string_inverter
             else list(DIAGNOSIS_MODES)
         )
-        self._attr_current_option = DIAGNOSIS_MODE_READ_ONLY
+        self._attr_current_option = (
+            DIAGNOSIS_MODE_READ_ONLY
+            if runtime_data.is_string_inverter
+            else DIAGNOSIS_MODE_AUTO_REPEAT
+        )
 
     async def async_added_to_hass(self) -> None:
         """Take the last choice back, then listen like every diagnosis entity."""
@@ -225,9 +249,17 @@ class DiagnosisModeSelect(DiagnosisEntity, SelectEntity, RestoreEntity):
         super().async_entity_id_changed(old_entity_id)
 
     async def async_select_option(self, option: str) -> None:
-        """Remember the mode; nothing starts until Start is pressed."""
+        """Remember the mode; nothing starts until Start is pressed.
+
+        An extended mode is the moment to look at the diagnosis's questions:
+        it is the one chosen in order to contribute a reading, and it is
+        still before the run. Read-only says nothing here -- Start says it
+        for every mode.
+        """
         self._attr_current_option = option
         self._runner.mode = option
+        if option != DIAGNOSIS_MODE_READ_ONLY:
+            async_check(self.hass, self._runner.entry)
         self.async_write_ha_state()
 
 
@@ -268,6 +300,12 @@ class DiagnosisStartButton(DiagnosisEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Start the chosen mode, if the presser may write where it writes."""
         mode = self._runner.mode
+        # The notification first, and whatever the mode: it lists the
+        # questions, and it has to be there to be read *after* the refusal
+        # below closes the dialog. Auto repeat can also run for days, so an
+        # unanswered one is worth saying while somebody is still at the
+        # screen.
+        async_check(self.hass, self._runner.entry)
         if mode != DIAGNOSIS_MODE_READ_ONLY:
             await async_authorize(
                 self.hass,
@@ -275,6 +313,11 @@ class DiagnosisStartButton(DiagnosisEntity, ButtonEntity):
                 self._runner.entry,
                 PERMISSION_CAPABILITY_TEST,
             )
+            # Refused, not warned: a capability test's findings are read
+            # against the house they were taken in, and the three questions
+            # it needs each have a truthful answer for every house
+            # (`testimony.py`). A read-only run is never refused.
+            async_refuse_if_unanswered(self._runner.entry)
         if mode == DIAGNOSIS_MODE_AUTO_REPEAT:
             self._runner.async_announce_start(mode)
             self._runner.continuous.async_turn_on()
