@@ -7,6 +7,10 @@ Each is one holding register carrying 0xAA or 0x55. The specification states
 both values for the first three, and the owner of an SH10RT observed both by
 their effect for the fourth -- the `on` and `off` codes travel with the
 description rather than being assumed.
+
+From github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant (MIT),
+where `doc/architecture.md` records which document or measurement each
+register comes from. Keep this line with any copy -- `doc/attribution.md`.
 """
 
 from __future__ import annotations
@@ -85,6 +89,16 @@ SWITCH_DESCRIPTIONS: tuple[SungrowSwitchDescription, ...] = (
         entity_category=EntityCategory.CONFIG,
     ),
     SungrowSwitchDescription(
+        key="weekend_discharge_schedule",
+        component="discharge_weekend",
+        field="weekend_discharge_raw",
+        translation_key="weekend_discharge_schedule",
+        requires=Capability.DISCHARGE_SCHEDULE_CONTROL,
+        on_value=0xAA,
+        off_value=0x55,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    SungrowSwitchDescription(
         key="ev_charger_charging",
         component="ev_charger",
         field="ev_charger_charging_raw",
@@ -102,6 +116,58 @@ SWITCH_DESCRIPTIONS: tuple[SungrowSwitchDescription, ...] = (
         requires=Capability.EV_CHARGER_CONTROL,
         on_value=0xAA,
         off_value=0x55,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    SungrowSwitchDescription(
+        key="weekday_discharge_end_1_all_day",
+        component="discharge_weekday",
+        field="weekday_discharge_end_1_hour",
+        minute_field="weekday_discharge_end_1_minute",
+        translation_key="weekday_discharge_end_1_all_day",
+        requires=Capability.DISCHARGE_SCHEDULE_CONTROL,
+        on_value=24,
+        on_minute=0,
+        off_value=23,
+        off_minute=59,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    SungrowSwitchDescription(
+        key="weekday_discharge_end_2_all_day",
+        component="discharge_weekday",
+        field="weekday_discharge_end_2_hour",
+        minute_field="weekday_discharge_end_2_minute",
+        translation_key="weekday_discharge_end_2_all_day",
+        requires=Capability.DISCHARGE_SCHEDULE_CONTROL,
+        on_value=24,
+        on_minute=0,
+        off_value=23,
+        off_minute=59,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    SungrowSwitchDescription(
+        key="weekend_discharge_end_1_all_day",
+        component="discharge_weekend",
+        field="weekend_discharge_end_1_hour",
+        minute_field="weekend_discharge_end_1_minute",
+        translation_key="weekend_discharge_end_1_all_day",
+        requires=Capability.DISCHARGE_SCHEDULE_CONTROL,
+        on_value=24,
+        on_minute=0,
+        off_value=23,
+        off_minute=59,
+        entity_category=EntityCategory.CONFIG,
+    ),
+    SungrowSwitchDescription(
+        key="weekend_discharge_end_2_all_day",
+        component="discharge_weekend",
+        field="weekend_discharge_end_2_hour",
+        minute_field="weekend_discharge_end_2_minute",
+        translation_key="weekend_discharge_end_2_all_day",
+        requires=Capability.DISCHARGE_SCHEDULE_CONTROL,
+        on_value=24,
+        on_minute=0,
+        off_value=23,
+        off_minute=59,
         entity_category=EntityCategory.CONFIG,
     ),
 )

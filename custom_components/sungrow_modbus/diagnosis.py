@@ -57,8 +57,10 @@ from sungrow_modbus.capability_test import (
 from sungrow_modbus.capability_test.plausibility import FIELDS, Plausibility
 from sungrow_modbus.wallbox import (
     ledger as wallbox_ledger,
+    management as wallbox_management,
     plausibility as wallbox_plausibility,
 )
+from sungrow_modbus.wallbox.capability_test import CHARGING as WALLBOX_CHARGING
 
 from .const import (
     CAPABILITY_TEST_PERMISSION_DEFAULT,
@@ -238,6 +240,11 @@ class DiagnosisRunner:
         self._wallbox_folded: dict[str, Any] | None = None
         #: The wallbox's readings checked against each other, kept per firmware.
         self.wallbox_plausibility = wallbox_plausibility.WallboxPlausibility()
+        #: What drives the wallbox, inferred from how its output current
+        #: setting behaves while a car charges. It decides what is shown and
+        #: nothing else: what may be written to a wallbox is the owner's word
+        #: in the entry's options (`sungrow_modbus.wallbox.management`).
+        self.wallbox_management = wallbox_management.Management()
         self._wallbox_firmware: str | None = None
         #: The readings' own checks are fed on their own timer, not auto
         #: repeat's, because **they write nothing**. Auto repeat is a leave to
@@ -344,6 +351,13 @@ class DiagnosisRunner:
             load = None if found is None else float(found)
         self.wallbox_plausibility.observe(
             wallbox_plausibility.values(reading, load), dt_util.as_local(now)
+        )
+        # The same poll answers who drives the wallbox, at no extra read: an
+        # inverter that manages a charge rewrites 21203 every few seconds.
+        status = reading.get("charging_status_raw")
+        self.wallbox_management.observe(
+            reading.get("output_current_setting"),
+            charging=status is not None and int(status) == WALLBOX_CHARGING,
         )
         firmware = self._wallbox_firmware
         collection = self.wallbox_plausibility
@@ -891,20 +905,43 @@ class DiagnosisRunner:
             )
 
     async def async_clear_ledger(self) -> None:
-        """Forget every kept run, and the notification that showed them."""
-        from .capability_test import async_ledger_clear, plausibility_store
+        """Forget every kept run, and the notification that showed them.
+
+        **The readings' own evidence stays**, and the two are separate
+        because they are gathered differently: a run is minutes of writing
+        that can be asked for again this evening, where the readings' checks
+        are fed every minute for days and a house that loses them waits days
+        for them back. An owner starting the runs afresh -- after a wrong
+        verdict, or a changed installation -- was discarding both
+        (`async_clear_readings` is the other half).
+        """
+        from .capability_test import async_ledger_clear
 
         await async_ledger_clear(self.hass, self.entry)
-        await plausibility_store(self.hass, self.entry).async_remove()
-        self.plausibility = Plausibility()
         self._folded = None
         if self.wallbox_present:
             await async_wallbox_ledger_clear(self.hass, self.entry)
-            await wallbox_plausibility_store(self.hass, self.entry).async_remove()
-            self.wallbox_plausibility = wallbox_plausibility.WallboxPlausibility()
             self._wallbox_folded = None
         self._set(capability_test=None)
         persistent_notification.async_dismiss(self.hass, self._ledger_notification_id)
+
+    async def async_clear_readings(self) -> None:
+        """Forget what the readings' checks have gathered. The runs stay.
+
+        Days of observations, so this is the expensive one to press and the
+        reason the two are apart. Nothing has to be re-armed afterwards:
+        ordinary polling feeds the checks again from the next minute, whatever
+        the diagnosis mode.
+        """
+        from .capability_test import plausibility_store
+
+        await plausibility_store(self.hass, self.entry).async_remove()
+        self.plausibility = Plausibility()
+        if self.wallbox_present:
+            await wallbox_plausibility_store(self.hass, self.entry).async_remove()
+            self.wallbox_plausibility = wallbox_plausibility.WallboxPlausibility()
+        # The summary counts the readings' rows, so it has just changed.
+        self.async_notify()
 
     @staticmethod
     def _fold(runs: list[dict[str, Any]]) -> dict[str, Any] | None:

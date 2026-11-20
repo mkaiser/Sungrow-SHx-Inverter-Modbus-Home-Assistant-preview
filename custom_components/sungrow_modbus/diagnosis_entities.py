@@ -75,6 +75,7 @@ DIAGNOSIS_ENTITIES: tuple[tuple[str, str], ...] = (
     ("button", "diagnosis_start"),
     ("button", "diagnosis_stop"),
     ("button", "clear_capability_test_history"),
+    ("button", "clear_capability_test_readings"),
     ("sensor", "diagnosis_progress"),
     ("sensor", "diagnosis_step"),
     ("sensor", "diagnosis_finished"),
@@ -508,6 +509,37 @@ class ClearCapabilityTestHistoryButton(DiagnosisEntity, ButtonEntity):
         await self._runner.async_clear_ledger()
 
 
+class ClearCapabilityTestReadingsButton(DiagnosisEntity, ButtonEntity):
+    """Forget what the readings' checks have gathered, and watch afresh.
+
+    The other half of the button above, and the expensive one: those checks
+    are fed every minute for days (`capability_test/plausibility.py`), so a
+    house that presses this waits days for the evidence back, where a run can
+    be asked for again this evening. Writes nothing to the inverter.
+
+    **Not the remedy for a wrong verdict.** A check whose rule changed carries
+    a revision (`plausibility.CHECK_REVISIONS`), and raising it makes every
+    house drop that check's evidence alone, on update, with nothing for an
+    owner to press.
+    """
+
+    def __init__(self, runtime_data: SungrowRuntimeData) -> None:
+        """Name it for what pressing it does."""
+        super().__init__(runtime_data, "clear_capability_test_readings")
+
+    @property
+    def available(self) -> bool:
+        """Unavailable while a run is in flight; it is about to publish them."""
+        return not self._runner.state.running
+
+    async def async_press(self) -> None:
+        """Empty the readings' store."""
+        await async_authorize(
+            self.hass, self._context, self._runner.entry, PERMISSION_CAPABILITY_TEST
+        )
+        await self._runner.async_clear_readings()
+
+
 class CapabilityTestStatusSensor(DiagnosisEntity, SensorEntity):
     """How far a collection of capability test runs has got, and what it awaits.
 
@@ -532,6 +564,19 @@ class CapabilityTestStatusSensor(DiagnosisEntity, SensorEntity):
         """Whether an extended run is in flight, which is when time is shown."""
         state = self._runner.state
         return state.running and state.extended and state.started is not None
+
+    def _management(self) -> dict[str, Any]:
+        """Return what drives the wallbox, where there is one, and why.
+
+        Shown so that an owner can see what the integration believes before
+        anything acts on it -- and it is read here only: what may be written
+        to a wallbox is their own answer in the entry's options
+        (`sungrow_modbus.wallbox.management`). Absent where there is no
+        wallbox, rather than an attribute saying "unknown" about nothing.
+        """
+        if not self._runner.wallbox_present:
+            return {}
+        return self._runner.wallbox_management.as_dict()
 
     async def async_added_to_hass(self) -> None:
         """Listen, start the clock if a run is already going, stop it at removal."""
@@ -604,6 +649,7 @@ class CapabilityTestStatusSensor(DiagnosisEntity, SensorEntity):
         if "summary" not in folded:
             return {
                 **self._runner.continuous.attributes(),
+                **self._management(),
                 "running_since": running_since,
                 "established": None,
                 "total": None,
@@ -613,6 +659,7 @@ class CapabilityTestStatusSensor(DiagnosisEntity, SensorEntity):
         runs = folded.get("runs") or []
         return {
             **self._runner.continuous.attributes(),
+            **self._management(),
             "running_since": running_since,
             "established": established,
             "total": total,
