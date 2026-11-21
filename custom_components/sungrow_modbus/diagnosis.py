@@ -111,6 +111,13 @@ SIGNAL_DIAGNOSIS = "sungrow_modbus_diagnosis_{}"
 PART_A = "diagnosis"
 PART_B = "capability test"
 
+#: Why auto repeat stops after a run that could not put everything back: the
+#: next run would save the test's values as the owner's, over the snapshot
+#: the repair restores from.
+LEFT_CHANGED = (
+    "a run could not put everything back; see Settings -> Repairs, then start again"
+)
+
 #: A run of the wallbox's own checks: after part B in an extended run, or alone
 #: when auto repeat finds one due. Never at the same time as either.
 PART_WALLBOX = "wallbox capability test"
@@ -406,9 +413,19 @@ class DiagnosisRunner:
 
     @callback
     def _set(self, **changes: Any) -> None:
-        """Replace the state and tell the entities, in that order."""
+        """Replace the state and tell the entities, in that order.
+
+        A run ending is the moment auto repeat's line goes stale: it said
+        "running for ..." or "a run is in progress", and would keep saying it
+        until the next tick. So it looks again at once (T077). That cannot
+        start the next run early: every way a run ends sets `finished`, and
+        both of its paths keep the quiet after a run before starting one.
+        """
+        ended = self.state.running and changes.get("running") is False
         self.state = replace(self.state, **changes)
         async_dispatcher_send(self.hass, self.signal)
+        if ended and self.continuous.active:
+            self.continuous.async_run_ended()
 
     @callback
     def async_start(
@@ -613,7 +630,7 @@ class DiagnosisRunner:
         hook for the window in which the inverter may be stopped and that hook
         should not outlive the run that armed it.
         """
-        from .capability_test import CapabilityTestRunner
+        from .capability_test import CapabilityTestRunner, UnfinishedRestoreError
 
         self._set(part=PART_B, step="starting the capability test")
         runner = CapabilityTestRunner(
@@ -634,13 +651,20 @@ class DiagnosisRunner:
         )
         self._capability_runner = runner
         try:
-            return await runner.async_run(
+            block = await runner.async_run(
                 on_progress=lambda fraction, label: self._on_progress(
                     share + fraction * (1.0 - share), f"{PART_B}: {label}"
                 )
             )
+        except UnfinishedRestoreError:
+            self.continuous.async_turn_off(LEFT_CHANGED)
+            raise
         finally:
             self._capability_runner = None
+        if runner.left_changed:
+            # The next run would snapshot the test's values as the owner's.
+            self.continuous.async_turn_off(LEFT_CHANGED)
+        return block
 
     @callback
     def async_stop(self) -> None:
