@@ -12,6 +12,7 @@ const TEXT = {
     hold: "Hold {s} s to change",
     unlocked: "Unlocked, locks in {s} s",
     lock: "Lock",
+    history_note: "On some inverters the yearly PV and PV export read too high; the lifetime totals are not affected.",
     strategy_description: "Inverter, battery and wallbox, built from what your house has.",
     lock_description: "Guards any card against changes until it is held for a few seconds.",
     flow_description: "Power between PV, house, grid and battery, live.",
@@ -78,6 +79,7 @@ const TEXT = {
     hold: "{s} s halten zum Ändern",
     unlocked: "Entsperrt, sperrt in {s} s",
     lock: "Sperren",
+    history_note: "Bei manchen Wechselrichtern sind die Jahreswerte für PV und PV-Einspeisung zu hoch; die Gesamtzähler sind davon nicht betroffen.",
     strategy_description: "Wechselrichter, Batterie und Wallbox, gebaut aus dem, was das Haus hat.",
     lock_description: "Schützt eine Karte vor Änderungen, bis sie einige Sekunden gehalten wird.",
     flow_description: "Leistung zwischen PV, Haus, Netz und Batterie, live.",
@@ -114,7 +116,7 @@ const TEXT = {
     log: "Protokoll, letzte 24 Stunden", log_empty: "Noch nichts aufgezeichnet.", log_unavailable: "Das Protokoll konnte nicht gelesen werden.",
     runs: "Läufe ({n})", run: "Lauf {n}", put_back: "alle {n} Einstellungen wie vorher", not_put_back: "Nicht zurückgesetzt: {fields}",
     download: "Letzte Diagnose herunterladen",
-    download_failed: "Das Dokument ist nicht mehr da: es bleibt bis zum Neustart von Home Assistant. Diagnose herunterladen auf der Geräteseite enthält die Ergebnisse.",
+    download_failed: "Das Dokument ist nicht mehr da: es bleibt bis zum Neustart von Home Assistant. Diagnosedaten herunterladen auf der Geräteseite enthält die Ergebnisse.",
     test_docs: "Was die Tests tun",
     measuring: "Wird gerade gemessen: {what}", auto_waits: "Die automatische Wiederholung ist an, gerade läuft kein Test.", starting: "Startet",
     run_overall: "Insgesamt", run_overall_value: "{n} von {total} Prüfungen", run_none: "noch kein Test aufbewahrt", run_this: "Dieser Lauf",
@@ -141,6 +143,23 @@ const TEXT = {
 
 // On the development branch until the merge into main, which moves it.
 export const DOCS = "https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant/blob/proper-ha-integration/doc";
+
+// The profile's number format, which need not be its language's. An array is
+// tried in order, as Home Assistant's own formatter does.
+const NUMBER_LOCALES = {
+  comma_decimal: ["en-US", "en"],
+  decimal_comma: ["de", "es", "it"],
+  space_comma: ["fr", "sv", "cs"],
+  quote_decimal: ["de-CH"],
+  system: undefined,
+};
+export const numberLocale = (hass) => {
+  const format = hass.locale?.number_format;
+  return {
+    locale: format in NUMBER_LOCALES ? NUMBER_LOCALES[format] : hass.locale?.language,
+    options: format === "none" ? { useGrouping: false } : {},
+  };
+};
 
 export const language = (hass) => {
   const lang = (hass?.locale?.language || hass?.language || navigator.language || "en").split("-")[0];
